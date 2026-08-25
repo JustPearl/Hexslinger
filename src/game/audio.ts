@@ -66,10 +66,59 @@ export class HexAudio {
   }
 
   shoot() {
-    this.noise(0.16, 0.9, 2600, 240);
-    this.noise(0.05, 0.7, 6000, 1500, "bandpass");
-    this.tone(190, 46, 0.14, 0.55, "square");
-    this.tone(90, 30, 0.22, 0.5, "sine");
+    // cannon crack — layered noise body
+    this.noise(0.34, 1.0, 1900, 130);
+    this.noise(0.06, 0.8, 5200, 1400, "bandpass");
+    this.noise(0.5, 0.35, 420, 70); // dungeon boom tail
+    // mechanical square thwack
+    this.tone(150 + Math.random() * 20, 38, 0.16, 0.5, "square");
+    // sub-bass chest punch
+    this.tone(72, 26, 0.3, 0.85, "sine");
+    this.tone(48, 22, 0.4, 0.55, "sine");
+    // hammer/lock click just behind the blast
+    if (this.ctx && this.master) {
+      const t = this.ctx.currentTime;
+      const o = this.ctx.createOscillator();
+      o.type = "square";
+      o.frequency.setValueAtTime(950, t + 0.05);
+      o.frequency.exponentialRampToValueAtTime(320, t + 0.09);
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.setValueAtTime(0.12, t + 0.05);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+      o.connect(g).connect(this.master);
+      o.start(t + 0.05);
+      o.stop(t + 0.12);
+    }
+  }
+  casings() {
+    if (!this.ctx || !this.master) return;
+    for (let i = 0; i < 6; i++) {
+      const at = this.ctx.currentTime + 0.08 + i * 0.09 + Math.random() * 0.04;
+      const o = this.ctx.createOscillator();
+      o.type = "square";
+      o.frequency.setValueAtTime(1900 + Math.random() * 900, at);
+      o.frequency.exponentialRampToValueAtTime(700, at + 0.05);
+      const g = this.ctx.createGain();
+      g.gain.setValueAtTime(0.0001, at);
+      g.gain.setValueAtTime(0.09 + Math.random() * 0.05, at + 0.004);
+      g.gain.exponentialRampToValueAtTime(0.001, at + 0.08);
+      o.connect(g).connect(this.master);
+      o.start(at);
+      o.stop(at + 0.1);
+      const src = this.ctx.createBufferSource();
+      src.buffer = this.noiseBuf;
+      const f = this.ctx.createBiquadFilter();
+      f.type = "bandpass";
+      f.frequency.value = 4200 + Math.random() * 1600;
+      f.Q.value = 6;
+      const ng = this.ctx.createGain();
+      ng.gain.setValueAtTime(0.06, at);
+      ng.gain.exponentialRampToValueAtTime(0.001, at + 0.05);
+      src.connect(f).connect(ng).connect(this.master);
+      src.start(at);
+      src.stop(at + 0.06);
+    }
   }
   dryFire() {
     this.noise(0.03, 0.4, 4000, 2000, "highpass");

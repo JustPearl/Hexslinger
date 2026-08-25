@@ -21,8 +21,8 @@ const SoulFlame = ({ size = 14 }: { size?: number }) => (
 
 const Cartridge = ({ filled }: { filled: boolean }) => (
   <svg width="10" height="26" viewBox="0 0 10 26">
-    <path d="M2 6h6l1 3v13H1V9l1-3Z" fill={filled ? "#e8e2d2" : "none"} stroke="#8a867a" strokeWidth="1.4" />
-    <rect x="3" y="1" width="4" height="4" fill={filled ? "#e8e2d2" : "none"} stroke="#8a867a" strokeWidth="1.4" />
+    <path d="M2 6h6l1 3v13H1V9l1-3Z" fill={filled ? "#ff9432" : "none"} stroke={filled ? "#c56f22" : "#8a867a"} strokeWidth="1.4" />
+    <rect x="3" y="1" width="4" height="4" fill={filled ? "#ffd9a0" : "none"} stroke={filled ? "#c56f22" : "#8a867a"} strokeWidth="1.4" />
   </svg>
 );
 
@@ -88,17 +88,19 @@ const DEFAULT_HUD: HudData = {
 
 interface FeedItem { id: number; text: string; dying: boolean }
 
-function SpellSlot({ icon, label, keyName, cost, ready, affordable }: {
-  icon: React.ReactNode; label: string; keyName: string; cost: number; ready: number; affordable: boolean;
+function SpellSlot({ icon, label, keyName, cost, ready, affordable, tint }: {
+  icon: React.ReactNode; label: string; keyName: string; cost: number; ready: number; affordable: boolean; tint: string;
 }) {
   const deg = Math.round((1 - Math.max(0, Math.min(1, ready))) * 360);
   const isReady = ready >= 1;
+  const on = isReady && affordable;
   return (
-    <div className={`relative w-[86px] border-2 px-1.5 py-1.5 text-center transition-colors ${isReady && affordable ? "border-bone bg-black/70" : "border-ash/50 bg-black/50"}`}>
-      <div className={`flex justify-center ${isReady && affordable ? "text-bone" : "text-ash/70"}`}>{icon}</div>
+    <div className={`relative w-[86px] border-2 px-1.5 py-1.5 text-center transition-colors ${on ? "bg-black/70" : "border-ash/50 bg-black/50"}`}
+      style={on ? { borderColor: tint } : undefined}>
+      <div className={`flex justify-center ${on ? "" : "text-ash/70"}`} style={on ? { color: tint, filter: `drop-shadow(0 0 6px ${tint}66)` } : undefined}>{icon}</div>
       <div className="font-type text-[9px] tracking-[0.14em] text-bone/80 leading-tight mt-0.5">{label}</div>
       <div className="font-type text-[8px] text-ash leading-none mt-0.5">
-        <kbd className="key !text-[8px] !px-1 !py-0">{keyName}</kbd> <span className={affordable ? "" : "text-bone"}>{cost}◈</span>
+        <kbd className="key !text-[8px] !px-1 !py-0">{keyName}</kbd> <span style={affordable ? { color: tint } : undefined} className={affordable ? "" : "text-bone"}>{cost}◈</span>
       </div>
       {!isReady && (
         <div className="absolute inset-0 pointer-events-none" style={{ background: `conic-gradient(rgba(6,6,6,0.82) ${deg}deg, transparent 0deg)` }} />
@@ -293,8 +295,8 @@ export default function App() {
 
           {/* bottom-center: hexes */}
           <div className="absolute bottom-6 left-1/2 flex -translate-x-1/2 items-end gap-3">
-            <SpellSlot icon={<HellboltIcon />} label="HELLBOLT" keyName="RMB" cost={30} ready={hud.boltReady} affordable={hud.souls >= 30} />
-            <SpellSlot icon={<NovaIcon />} label="GRAVE NOVA" keyName="Q" cost={55} ready={hud.novaReady} affordable={hud.souls >= 55} />
+            <SpellSlot icon={<HellboltIcon />} label="HELLBOLT" keyName="RMB" cost={30} ready={hud.boltReady} affordable={hud.souls >= 30} tint="#63d8ff" />
+            <SpellSlot icon={<NovaIcon />} label="GRAVE NOVA" keyName="Q" cost={55} ready={hud.novaReady} affordable={hud.souls >= 55} tint="#63d8ff" />
           </div>
 
           {/* wave banner */}

@@ -150,6 +150,68 @@ export function makeStarTexture(): THREE.CanvasTexture {
   return toTexture(c, false);
 }
 
+/** Soft grey smoke puff. */
+export function makeSmokeTexture(): THREE.CanvasTexture {
+  const [c, ctx] = canvas(64);
+  ctx.clearRect(0, 0, 64, 64);
+  for (let i = 0; i < 7; i++) {
+    const x = 32 + (Math.random() - 0.5) * 22;
+    const y = 32 + (Math.random() - 0.5) * 22;
+    const r = 9 + Math.random() * 12;
+    const g = ctx.createRadialGradient(x, y, 1, x, y, r);
+    g.addColorStop(0, "rgba(120,118,112,0.5)");
+    g.addColorStop(1, "rgba(120,118,112,0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 64, 64);
+  }
+  return toTexture(c, false);
+}
+
+/** Irregular dark scorch mark for bullet impacts. */
+export function makeScorchTexture(): THREE.CanvasTexture {
+  const [c, ctx] = canvas(64);
+  ctx.clearRect(0, 0, 64, 64);
+  const g = ctx.createRadialGradient(32, 32, 2, 32, 32, 28);
+  g.addColorStop(0, "rgba(0,0,0,0.95)");
+  g.addColorStop(0.4, "rgba(4,4,4,0.75)");
+  g.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  for (let i = 0; i < 12; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const d = 14 + Math.random() * 14;
+    const x = 32 + Math.cos(a) * d;
+    const y = 32 + Math.sin(a) * d;
+    const r = 2 + Math.random() * 5;
+    const sg = ctx.createRadialGradient(x, y, 0.5, x, y, r);
+    sg.addColorStop(0, "rgba(0,0,0,0.7)");
+    sg.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = sg;
+    ctx.fillRect(0, 0, 64, 64);
+  }
+  return toTexture(c, false);
+}
+
+/** Flame-shaped glow for wisps and torch fire. */
+export function makeFlameTexture(): THREE.CanvasTexture {
+  const [c, ctx] = canvas(64);
+  ctx.clearRect(0, 0, 64, 64);
+  // teardrop body
+  const body = ctx.createRadialGradient(32, 40, 2, 32, 40, 22);
+  body.addColorStop(0, "rgba(255,255,255,0.95)");
+  body.addColorStop(0.5, "rgba(255,255,255,0.45)");
+  body.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = body;
+  ctx.fillRect(0, 0, 64, 64);
+  // rising tip
+  const tip = ctx.createRadialGradient(32, 22, 1, 32, 26, 16);
+  tip.addColorStop(0, "rgba(255,255,255,0.7)");
+  tip.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = tip;
+  ctx.fillRect(0, 0, 64, 64);
+  return toTexture(c, false);
+}
+
 /** Pixel rune sigil for the spell orb / nova ring. */
 export function makeRuneTexture(): THREE.CanvasTexture {
   const [c, ctx] = canvas(64);

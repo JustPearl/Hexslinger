@@ -6,6 +6,9 @@ import {
   makeGlowTexture,
   makeStarTexture,
   makeRuneTexture,
+  makeSmokeTexture,
+  makeScorchTexture,
+  makeFlameTexture,
 } from "./textures";
 import { HexAudio } from "./audio";
 import { generateDungeon, Collider, CELL, GRID_W, GRID_H, WALL_H, type Dungeon } from "./dungeon";
@@ -119,6 +122,48 @@ interface Chunk {
   alive: boolean;
 }
 
+interface Puff {
+  sprite: THREE.Sprite;
+  pos: THREE.Vector3;
+  vel: THREE.Vector3;
+  life: number;
+  maxLife: number;
+  grow: number;
+  alive: boolean;
+}
+
+interface Scorch {
+  sprite: THREE.Sprite;
+  life: number;
+  alive: boolean;
+}
+
+interface Wisp {
+  sprite: THREE.Sprite;
+  pos: THREE.Vector3;
+  seed: number;
+  life: number;
+  maxLife: number;
+  alive: boolean;
+}
+
+interface Casing {
+  mesh: THREE.Mesh;
+  pos: THREE.Vector3;
+  vel: THREE.Vector3;
+  spin: THREE.Vector3;
+  life: number;
+  alive: boolean;
+}
+
+interface FlashSpr {
+  sprite: THREE.Sprite;
+  life: number;
+  maxLife: number;
+  maxScale: number;
+  alive: boolean;
+}
+
 const ROMAN: [number, string][] = [
   [10, "X"], [9, "IX"], [5, "V"], [4, "IV"], [1, "I"],
 ];
@@ -163,6 +208,15 @@ const WAVE_SUBS = [
 
 const rnd = (a: number, b: number) => a + Math.random() * (b - a);
 const pick = <T,>(arr: T[]) => arr[Math.floor(Math.random() * arr.length)];
+
+/* The dungeon is bone-and-soot monochrome. Only hellfire and hexcraft get color. */
+const C_MUZZLE = 0xff9432; // hot ember orange — gunfire
+const C_MUZZLE_HOT = 0xffd9a0;
+const C_SPELL = 0x63d8ff; // spectral cyan — hexcraft
+const C_SPELL_HOT = 0xcdf2ff;
+const COL_BONE: [number, number, number] = [1, 0.96, 0.87];
+const COL_EMBER: [number, number, number] = [1, 0.55, 0.18];
+const COL_HEX: [number, number, number] = [0.42, 0.86, 1];
 
 /* ============================== engine ============================== */
 
@@ -264,6 +318,24 @@ export class HexEngine {
   private chunks: Chunk[] = [];
   private readonly CHUNK_N = 180;
 
+  private smokePool: Puff[] = [];
+  private scorchPool: Scorch[] = [];
+  private wispPool: Wisp[] = [];
+  private casingPool: Casing[] = [];
+  private flashSprPool: FlashSpr[] = [];
+  private smokeTex!: THREE.Texture;
+  private scorchTex!: THREE.Texture;
+  private flameTex!: THREE.Texture;
+
+  /* heavy weapon feel */
+  private fovKick = 0;
+  private fovBase = 74;
+  private rollKick = 0;
+  private fireSign = 1;
+  private gunKick = 0;
+  private killStopT = 0;
+  private vmLag = new THREE.Vector3();
+
   private dmgPool: { sprite: THREE.Sprite; canvas: HTMLCanvasElement; tex: THREE.CanvasTexture; life: number; vel: THREE.Vector3 }[] = [];
   private tracerPool: { mesh: THREE.Mesh; life: number }[] = [];
 
@@ -291,6 +363,9 @@ export class HexEngine {
     this.glowTex = makeGlowTexture();
     this.starTex = makeStarTexture();
     this.runeTex = makeRuneTexture();
+    this.smokeTex = makeSmokeTexture();
+    this.scorchTex = makeScorchTexture();
+    this.flameTex = makeFlameTexture();
 
     this.dungeon = generateDungeon(1349 + Math.floor(Math.random() * 9999));
     this.collider = new Collider(this.dungeon);
@@ -416,7 +491,7 @@ export class HexEngine {
 
     // torch sconces (lights added in buildLights)
     const sconceMat = new THREE.MeshLambertMaterial({ color: 0x1d1d1a });
-    const flameMat = new THREE.SpriteMaterial({ map: this.glowTex, color: 0xfff3d8, blending: THREE.AdditiveBlending, depthWrite: false });
+    const flameMat = new THREE.SpriteMaterial({ map: this.flameTex, color: 0xefe9d8, blending: THREE.AdditiveBlending, depthWrite: false });
     for (const t of d.torches) {
       const g = new THREE.Group();
       const arm = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.5, 0.1), sconceMat);
@@ -480,24 +555,24 @@ export class HexEngine {
     this.scene.add(new THREE.AmbientLight(0xb9b2a0, 0.42));
     for (let i = 0; i < this.dungeon.torches.length; i++) {
       const t = this.dungeon.torches[i];
-      const l = new THREE.PointLight(0xffe9c0, 26, 17, 1.8);
+      const l = new THREE.PointLight(0xdcd6c4, 26, 17, 1.8);
       l.position.set(t.x + t.nx * 0.4, 2.85, t.z + t.nz * 0.4);
       this.scene.add(l);
       this.torchLights.push(l);
       this.torchSeeds.push(rnd(0, 100));
     }
     for (const b of this.brazierPos) {
-      const l = new THREE.PointLight(0xfff0cc, 30, 19, 1.8);
+      const l = new THREE.PointLight(0xdcd6c4, 30, 19, 1.8);
       l.position.copy(b).add(new THREE.Vector3(0, 0.4, 0));
       this.scene.add(l);
       this.torchLights.push(l);
       this.torchSeeds.push(rnd(0, 100));
     }
-    this.muzzleLight = new THREE.PointLight(0xfff2d5, 0, 10, 2);
+    this.muzzleLight = new THREE.PointLight(C_MUZZLE, 0, 12, 2);
     this.scene.add(this.muzzleLight);
-    this.boltLight = new THREE.PointLight(0xf5eeda, 0, 13, 2);
+    this.boltLight = new THREE.PointLight(C_SPELL, 0, 14, 2);
     this.scene.add(this.boltLight);
-    this.flashLight = new THREE.PointLight(0xfaf4e2, 0, 22, 1.9);
+    this.flashLight = new THREE.PointLight(C_SPELL, 0, 24, 1.9);
     this.scene.add(this.flashLight);
 
     const handLight = new THREE.PointLight(0xd8d0bc, 1.6, 5, 2);
@@ -516,46 +591,131 @@ export class HexEngine {
     const gunDark = new THREE.MeshLambertMaterial({ color: 0x1c1c1b });
     const runeMat = new THREE.MeshLambertMaterial({ color: 0x141414, emissive: 0xd9d2bd, emissiveIntensity: 1.6 });
 
-    /* --- revolver hand (right) --- */
+    /* --- the Judge: a hand-cannon, not a pistol (right hand) --- */
     this.gunGroup = new THREE.Group();
-    this.gunGroup.position.set(0.34, -0.31, -0.58);
+    this.gunGroup.position.set(0.36, -0.33, -0.6);
 
-    const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.15, 0.6, 7), sleeveMat);
-    sleeve.position.set(0.14, -0.28, 0.28);
-    sleeve.rotation.set(0.85, 0, 0.55);
-    const hand = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.1, 0.15), skinMat);
-    hand.position.set(0.0, -0.12, 0.05);
-    const frame = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.1, 0.24), gunMetal);
-    frame.position.set(0, 0.0, -0.06);
-    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.3, 8), gunMetal);
-    barrel.rotation.x = Math.PI / 2;
-    barrel.position.set(0, 0.028, -0.3);
-    const underlug = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.035, 0.24), gunDark);
-    underlug.position.set(0, -0.015, -0.26);
-    this.chamber = new THREE.Mesh(new THREE.CylinderGeometry(0.042, 0.042, 0.1, 6), gunMetal);
+    const add = (mesh: THREE.Mesh) => this.gunGroup.add(mesh);
+
+    const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.18, 0.62, 7), sleeveMat);
+    sleeve.position.set(0.17, -0.33, 0.33);
+    sleeve.rotation.set(0.9, 0, 0.5);
+    add(sleeve);
+    const fist = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.13, 0.18), skinMat);
+    fist.position.set(0, -0.14, 0.06);
+    add(fist);
+    const knuckle = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.05, 0.1), skinMat);
+    knuckle.position.set(0, -0.06, 0.1);
+    add(knuckle);
+
+    // massive top-break frame
+    const frame = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.16, 0.36), gunMetal);
+    frame.position.set(0, 0.0, -0.02);
+    add(frame);
+    const topStrap = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.035, 0.4), gunDark);
+    topStrap.position.set(0, 0.085, -0.05);
+    add(topStrap);
+
+    // oversized hex cylinder
+    this.chamber = new THREE.Mesh(new THREE.CylinderGeometry(0.092, 0.092, 0.18, 6), gunMetal);
     this.chamber.rotation.x = Math.PI / 2;
-    this.chamber.position.set(0, 0.01, 0.02);
-    const hammer = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.06, 0.04), gunDark);
-    hammer.position.set(0, 0.075, 0.1);
-    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.16, 0.07), gunDark);
-    grip.position.set(0, -0.12, 0.09);
-    grip.rotation.x = 0.28;
-    const runePlate = new THREE.Mesh(new THREE.BoxGeometry(0.062, 0.05, 0.1), runeMat);
-    runePlate.position.set(0, 0.01, -0.06);
-    this.gunGroup.add(sleeve, hand, frame, barrel, underlug, this.chamber, hammer, grip, runePlate);
+    this.chamber.position.set(0, 0.005, 0.03);
+    add(this.chamber);
+    const cylPin = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.24, 6), gunDark);
+    cylPin.rotation.x = Math.PI / 2;
+    cylPin.position.set(0, 0.005, 0.03);
+    add(cylPin);
+
+    // rune plates on both frame flanks (dull bone sigils — monochrome)
+    const runeL = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.09, 0.18), runeMat);
+    runeL.position.set(-0.062, 0.0, -0.03);
+    const runeR = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.09, 0.18), runeMat);
+    runeR.position.set(0.062, 0.0, -0.03);
+    add(runeL); add(runeR);
+
+    // thick octagonal barrel with full-length rib + underlug
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.042, 0.05, 0.46, 8), gunMetal);
+    barrel.rotation.x = Math.PI / 2;
+    barrel.position.set(0, 0.035, -0.4);
+    add(barrel);
+    const rib = new THREE.Mesh(new THREE.BoxGeometry(0.032, 0.018, 0.44), gunDark);
+    rib.position.set(0, 0.082, -0.38);
+    add(rib);
+    const underlug = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.05, 0.32), gunDark);
+    underlug.position.set(0, -0.022, -0.32);
+    add(underlug);
+
+    // compensator with side vents
+    const comp = new THREE.Mesh(new THREE.CylinderGeometry(0.056, 0.056, 0.13, 8), gunMetal);
+    comp.rotation.x = Math.PI / 2;
+    comp.position.set(0, 0.035, -0.67);
+    add(comp);
+    for (let v = 0; v < 3; v++) {
+      const vent = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.016, 0.014), gunDark);
+      vent.position.set(0, 0.035, -0.635 - v * 0.035);
+      add(vent);
+    }
+    const muzzleRing = new THREE.Mesh(new THREE.CylinderGeometry(0.062, 0.062, 0.035, 8), gunDark);
+    muzzleRing.rotation.x = Math.PI / 2;
+    muzzleRing.position.set(0, 0.035, -0.745);
+    add(muzzleRing);
+
+    // sights
+    const frontSight = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.05, 0.02), gunDark);
+    frontSight.position.set(0, 0.117, -0.71);
+    add(frontSight);
+    const rearSight = new THREE.Mesh(new THREE.BoxGeometry(0.055, 0.022, 0.02), gunDark);
+    rearSight.position.set(0, 0.105, 0.07);
+    add(rearSight);
+
+    // slab hammer + guard + grip
+    const hammer = new THREE.Mesh(new THREE.BoxGeometry(0.03, 0.1, 0.055), gunDark);
+    hammer.position.set(0, 0.115, 0.17);
+    hammer.rotation.x = -0.3;
+    add(hammer);
+    const guard = new THREE.Mesh(new THREE.TorusGeometry(0.052, 0.009, 6, 10, Math.PI), gunDark);
+    guard.position.set(0, -0.07, 0.0);
+    guard.rotation.z = Math.PI;
+    add(guard);
+    const trigger = new THREE.Mesh(new THREE.BoxGeometry(0.014, 0.045, 0.016), gunMetal);
+    trigger.position.set(0, -0.085, 0.015);
+    add(trigger);
+    const grip = new THREE.Mesh(new THREE.BoxGeometry(0.095, 0.23, 0.12), gunDark);
+    grip.position.set(0, -0.19, 0.13);
+    grip.rotation.x = 0.35;
+    add(grip);
+    const gripCap = new THREE.Mesh(new THREE.BoxGeometry(0.105, 0.05, 0.14), gunMetal);
+    gripCap.position.set(0, -0.3, 0.17);
+    gripCap.rotation.x = 0.35;
+    add(gripCap);
+
+    // syndicate chain + skull charm hanging from the grip
+    const linkGeo = new THREE.TorusGeometry(0.018, 0.005, 5, 8);
+    const link1 = new THREE.Mesh(linkGeo, gunMetal);
+    link1.position.set(0.04, -0.33, 0.2);
+    const link2 = new THREE.Mesh(linkGeo, gunMetal);
+    link2.position.set(0.04, -0.365, 0.2);
+    link2.rotation.y = Math.PI / 2;
+    const charm = new THREE.Mesh(new THREE.BoxGeometry(0.032, 0.03, 0.022), new THREE.MeshLambertMaterial({ color: 0x9a948a }));
+    charm.position.set(0.04, -0.4, 0.2);
+    add(link1); add(link2); add(charm);
 
     this.muzzleAnchor = new THREE.Object3D();
-    this.muzzleAnchor.position.set(0, 0.028, -0.47);
+    this.muzzleAnchor.position.set(0, 0.035, -0.78);
     this.gunGroup.add(this.muzzleAnchor);
 
+    // ember muzzle flash — the only warm thing in the crypt
     this.muzzleFlash = new THREE.Group();
-    const flashMat = new THREE.SpriteMaterial({ map: this.starTex, color: 0xfff6de, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false });
+    const flashMat = new THREE.SpriteMaterial({ map: this.starTex, color: C_MUZZLE, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false });
     const f1 = new THREE.Sprite(flashMat);
-    f1.scale.set(0.5, 0.5, 1);
+    f1.scale.set(1.0, 1.0, 1);
     const f2 = new THREE.Sprite(flashMat.clone());
-    f2.scale.set(0.3, 0.3, 1);
+    f2.scale.set(0.62, 0.62, 1);
     f2.material.rotation = Math.PI / 4;
-    this.muzzleFlash.add(f1, f2);
+    f2.material.color = new THREE.Color(C_MUZZLE_HOT);
+    const f3 = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: C_MUZZLE_HOT, blending: THREE.AdditiveBlending, depthWrite: false, depthTest: false }));
+    f3.scale.set(0.55, 0.55, 1);
+    this.muzzleFlash.add(f1, f2, f3);
     this.muzzleFlash.visible = false;
     this.muzzleAnchor.add(this.muzzleFlash);
     this.vm.add(this.gunGroup);
@@ -573,10 +733,10 @@ export class HexEngine {
 
     this.spellOrb = new THREE.Group();
     this.spellOrb.position.set(0, 0.16, -0.05);
-    const orbCore = new THREE.Mesh(new THREE.OctahedronGeometry(0.07, 0), new THREE.MeshBasicMaterial({ color: 0xe9e2cd }));
-    const orbGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: 0xe9e2cd, blending: THREE.AdditiveBlending, depthWrite: false }));
-    orbGlow.scale.set(0.6, 0.6, 1);
-    const runeCard = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.runeTex, color: 0xcfc8b2, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.7 }));
+    const orbCore = new THREE.Mesh(new THREE.OctahedronGeometry(0.07, 0), new THREE.MeshBasicMaterial({ color: C_SPELL_HOT }));
+    const orbGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: C_SPELL, blending: THREE.AdditiveBlending, depthWrite: false }));
+    orbGlow.scale.set(0.7, 0.7, 1);
+    const runeCard = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.runeTex, color: C_SPELL, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.75 }));
     runeCard.scale.set(0.5, 0.5, 1);
     this.spellOrb.add(orbCore, orbGlow, runeCard);
     this.spellGroup.add(this.spellOrb);
@@ -636,19 +796,19 @@ export class HexEngine {
     tracerGeo.rotateX(Math.PI / 2);
     for (let i = 0; i < 5; i++) {
       const mesh = new THREE.Mesh(tracerGeo, new THREE.MeshBasicMaterial({
-        color: 0xece5d0, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false,
+        color: 0xffb066, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false,
       }));
       mesh.visible = false;
       this.scene.add(mesh);
       this.tracerPool.push({ mesh, life: 0 });
     }
 
-    // shockwave rings
-    for (let i = 0; i < 3; i++) {
+    // shockwave rings (hex-blue)
+    for (let i = 0; i < 6; i++) {
       const mesh = new THREE.Mesh(
         new THREE.RingGeometry(0.82, 1, 28),
         new THREE.MeshBasicMaterial({
-          map: this.runeTex, color: 0xd8d2bd, transparent: true, opacity: 0.9,
+          map: this.runeTex, color: C_SPELL, transparent: true, opacity: 0.9,
           side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false,
         })
       );
@@ -656,6 +816,45 @@ export class HexEngine {
       mesh.visible = false;
       this.scene.add(mesh);
       this.rings.push({ mesh, t: 0, maxT: 0.45, maxR: 4, alive: false });
+    }
+
+    // muzzle smoke puffs
+    for (let i = 0; i < 18; i++) {
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.smokeTex, color: 0xb5b0a2, transparent: true, opacity: 0, depthWrite: false }));
+      sprite.visible = false;
+      this.scene.add(sprite);
+      this.smokePool.push({ sprite, pos: new THREE.Vector3(), vel: new THREE.Vector3(), life: 0, maxLife: 1, grow: 1, alive: false });
+    }
+    // bullet scorch marks
+    for (let i = 0; i < 24; i++) {
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.scorchTex, transparent: true, opacity: 0, depthWrite: false }));
+      sprite.visible = false;
+      sprite.scale.set(0.45, 0.45, 1);
+      this.scene.add(sprite);
+      this.scorchPool.push({ sprite, life: 0, alive: false });
+    }
+    // soul wisps (bone on death, hex-blue for spells)
+    for (let i = 0; i < 20; i++) {
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.flameTex, color: 0xe9e2cd, blending: THREE.AdditiveBlending, transparent: true, opacity: 0, depthWrite: false }));
+      sprite.visible = false;
+      this.scene.add(sprite);
+      this.wispPool.push({ sprite, pos: new THREE.Vector3(), seed: rnd(0, 10), life: 0, maxLife: 1, alive: false });
+    }
+    // spent casings dumped from the cylinder
+    const casingGeo = new THREE.CylinderGeometry(0.018, 0.018, 0.058, 6);
+    const casingMat = new THREE.MeshLambertMaterial({ color: 0xc9c2ae });
+    for (let i = 0; i < 12; i++) {
+      const mesh = new THREE.Mesh(casingGeo, casingMat);
+      mesh.visible = false;
+      this.scene.add(mesh);
+      this.casingPool.push({ mesh, pos: new THREE.Vector3(), vel: new THREE.Vector3(), spin: new THREE.Vector3(), life: 0, alive: false });
+    }
+    // big flash sprites for spell detonations
+    for (let i = 0; i < 8; i++) {
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: C_SPELL, blending: THREE.AdditiveBlending, transparent: true, opacity: 0, depthWrite: false }));
+      sprite.visible = false;
+      this.scene.add(sprite);
+      this.flashSprPool.push({ sprite, life: 0, maxLife: 0.3, maxScale: 4, alive: false });
     }
   }
 
@@ -1017,6 +1216,8 @@ export class HexEngine {
     const top = this.enemyTop(e);
     this.burstChunks(e.pos.x, top * 0.5, e.pos.z, e.type === "brute" ? 26 : 15, 5.5);
     this.burst(e.pos.x, top * 0.5, e.pos.z, 16, 6, 0.8);
+    for (let k = 0; k < (e.type === "brute" ? 5 : 3); k++) this.spawnWisp(e.pos.x, top * 0.5, e.pos.z, 0xe9e2cd);
+    this.killStopT = 0.05;
     // drops
     const roll = Math.random();
     if (roll < 0.16) this.dropPickup(e.pos.x, e.pos.z, "heart");
@@ -1109,10 +1310,16 @@ export class HexEngine {
     }
     this.ammo--;
     this.shotsFired++;
-    this.fireCd = 0.26;
+    this.fireCd = 0.3;
     this.recoil = 1;
-    this.recoilPitch = Math.min(0.09, this.recoilPitch + 0.028);
-    this.muzzleT = 0.05;
+    this.gunKick = 1;
+    this.fovKick = Math.min(5, this.fovKick + 2.4);
+    this.fireSign *= -1;
+    this.rollKick += this.fireSign * 0.028;
+    this.recoilPitch = Math.min(0.13, this.recoilPitch + 0.046);
+    this.addShake(0.13);
+    this.muzzleT = 0.06;
+    this.chamber.rotation.y += Math.PI / 3;
     this.audio.shoot();
 
     const origin = this.camera.position.clone();
@@ -1138,17 +1345,20 @@ export class HexEngine {
     this.spawnTracer(end, hitDist);
     if (hitEnemy) {
       this.shotsHit++;
-      this.damageEnemy(hitEnemy, 34, dir.x * 1.6, dir.z * 1.6);
+      this.damageEnemy(hitEnemy, 42, dir.x * 2.4, dir.z * 2.4);
     } else if (wallDist < 60) {
-      this.burst(end.x, end.y, end.z, 7, 3, 0.35);
-      this.burstChunks(end.x, end.y, end.z, 3, 2.4);
+      this.burst(end.x, end.y, end.z, 9, 3.4, 0.4, COL_BONE);
+      this.burstChunks(end.x, end.y, end.z, 4, 2.8);
+      this.spawnScorch(end, dir);
     }
 
-    // muzzle light in world space
+    // muzzle eruption in world space
     const mp = new THREE.Vector3();
     this.muzzleAnchor.getWorldPosition(mp);
     this.muzzleLight.position.copy(mp);
-    this.muzzleLight.intensity = 30;
+    this.muzzleLight.intensity = 70;
+    this.burst(mp.x, mp.y, mp.z, 5, 2.2, 0.16, COL_EMBER);
+    this.spawnSmoke(mp, dir, 2);
 
     if (this.ammo === 0) this.startReload();
   }
@@ -1169,10 +1379,21 @@ export class HexEngine {
     this.audio.cast();
 
     const g = new THREE.Group();
-    const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.16, 0), new THREE.MeshBasicMaterial({ color: 0xefe8d3 }));
-    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: 0xe9e2cd, blending: THREE.AdditiveBlending, depthWrite: false }));
-    glow.scale.set(1.6, 1.6, 1);
-    g.add(core, glow);
+    const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.16, 0), new THREE.MeshBasicMaterial({ color: C_SPELL_HOT }));
+    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: C_SPELL, blending: THREE.AdditiveBlending, depthWrite: false }));
+    glow.scale.set(2.1, 2.1, 1);
+    const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.runeTex, color: C_SPELL, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.5, depthWrite: false }));
+    halo.scale.set(1.1, 1.1, 1);
+    g.add(core, glow, halo);
+    const orbiters: THREE.Sprite[] = [];
+    for (let oi = 0; oi < 3; oi++) {
+      const rs = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.runeTex, color: C_SPELL, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.7, depthWrite: false }));
+      rs.scale.set(0.3, 0.3, 1);
+      g.add(rs);
+      orbiters.push(rs);
+    }
+    g.userData.orbiters = orbiters;
+    g.userData.angle = rnd(0, 6);
     const dir = new THREE.Vector3();
     this.camera.getWorldDirection(dir);
     const start = this.camera.position.clone().addScaledVector(dir, 0.6);
@@ -1180,6 +1401,12 @@ export class HexEngine {
     g.position.copy(start);
     this.scene.add(g);
     this.bolts.push({ group: g, pos: start.clone(), vel: dir.multiplyScalar(17), life: 3, alive: true });
+
+    // hex discharge at the casting hand
+    const hand = new THREE.Vector3();
+    this.spellOrb.getWorldPosition(hand);
+    this.spawnFlash(hand.x, hand.y, hand.z, 1.6, C_SPELL, 0.22);
+    this.burst(hand.x, hand.y, hand.z, 8, 2.5, 0.3, COL_HEX);
   }
 
   private castNova() {
@@ -1190,11 +1417,19 @@ export class HexEngine {
     this.novaLunge = 1;
     this.audio.nova();
     this.spawnRing(this.pos.x, 0.1, this.pos.z, 7.2, 0.5);
+    this.spawnRing(this.pos.x, 0.14, this.pos.z, 4.8, 0.78);
+    this.spawnFlash(this.pos.x, 0.6, this.pos.z, 7.5, C_SPELL, 0.45);
+    this.spawnFlash(this.pos.x, 1.1, this.pos.z, 3, C_SPELL_HOT, 0.2);
     this.flashLight.position.set(this.pos.x, 1.4, this.pos.z);
-    this.flashLight.intensity = 90;
+    this.flashLight.intensity = 120;
     this.flashLightT = 0.35;
     this.burstChunks(this.pos.x, 0.8, this.pos.z, 26, 8);
-    this.burst(this.pos.x, 1, this.pos.z, 30, 9, 1);
+    this.burst(this.pos.x, 1, this.pos.z, 24, 9, 1, COL_HEX);
+    this.burst(this.pos.x, 0.5, this.pos.z, 14, 6, 0.6, COL_BONE);
+    for (let k = 0; k < 9; k++) {
+      const a = (k / 9) * Math.PI * 2;
+      this.spawnWisp(this.pos.x + Math.cos(a) * rnd(0.6, 2.2), 0.3, this.pos.z + Math.sin(a) * rnd(0.6, 2.2), C_SPELL);
+    }
     this.addShake(0.7);
     for (const e of this.enemies) {
       if (e.dead) continue;
@@ -1213,12 +1448,17 @@ export class HexEngine {
     this.scene.remove(b.group);
     this.audio.explosion();
     this.spawnRing(b.pos.x, 0.1, b.pos.z, 4.4, 0.4);
+    this.spawnRing(b.pos.x, 0.14, b.pos.z, 2.6, 0.62);
+    this.spawnFlash(b.pos.x, b.pos.y, b.pos.z, 5, C_SPELL, 0.34);
+    this.spawnFlash(b.pos.x, b.pos.y, b.pos.z, 2.2, C_SPELL_HOT, 0.18);
     this.flashLight.position.set(b.pos.x, 1.0, b.pos.z);
-    this.flashLight.intensity = 70;
+    this.flashLight.intensity = 95;
     this.flashLightT = 0.3;
     this.addShake(0.35);
     this.burstChunks(b.pos.x, b.pos.y, b.pos.z, 20, 6.5);
-    this.burst(b.pos.x, b.pos.y, b.pos.z, 24, 8, 0.9);
+    this.burst(b.pos.x, b.pos.y, b.pos.z, 18, 8, 0.9, COL_HEX);
+    this.burst(b.pos.x, b.pos.y, b.pos.z, 10, 4, 0.5, COL_BONE);
+    for (let k = 0; k < 5; k++) this.spawnWisp(b.pos.x, b.pos.y, b.pos.z, C_SPELL);
     for (const e of this.enemies) {
       if (e.dead) continue;
       const dx = e.pos.x - b.pos.x;
@@ -1261,7 +1501,7 @@ export class HexEngine {
   private addShake(v: number) { this.shake = Math.min(1.2, this.shake + v); }
 
   private sparkCursor = 0;
-  private burst(x: number, y: number, z: number, n: number, speed: number, life: number) {
+  private burst(x: number, y: number, z: number, n: number, speed: number, life: number, col: [number, number, number] = COL_BONE) {
     for (let k = 0; k < n; k++) {
       const i = this.sparkCursor = (this.sparkCursor + 1) % this.SPARK_N;
       this.sparkPos[i * 3] = x + rnd(-0.1, 0.1);
@@ -1274,8 +1514,74 @@ export class HexEngine {
       this.sparkVel[i * 3 + 1] = ph * sp * 0.8 + speed * 0.25;
       this.sparkVel[i * 3 + 2] = Math.sin(th) * sp;
       this.sparkLife[i] = life * rnd(0.5, 1);
-      const v = rnd(0.7, 1);
-      this.sparkCol[i * 3] = v; this.sparkCol[i * 3 + 1] = v * 0.96; this.sparkCol[i * 3 + 2] = v * 0.86;
+      const v = rnd(0.55, 1);
+      this.sparkCol[i * 3] = col[0] * v; this.sparkCol[i * 3 + 1] = col[1] * v; this.sparkCol[i * 3 + 2] = col[2] * v;
+    }
+  }
+
+  private spawnSmoke(at: THREE.Vector3, dir: THREE.Vector3, n: number) {
+    for (let k = 0; k < n; k++) {
+      const p = this.smokePool.find((q) => !q.alive) ?? this.smokePool[0];
+      p.alive = true;
+      p.pos.copy(at).addScaledVector(dir, 0.08);
+      p.vel.set(dir.x * 0.5 + rnd(-0.15, 0.15), 0.42 + rnd(0, 0.25), dir.z * 0.5 + rnd(-0.15, 0.15));
+      p.maxLife = rnd(0.8, 1.4);
+      p.life = p.maxLife;
+      p.grow = rnd(0.55, 0.85);
+      p.sprite.visible = true;
+      p.sprite.position.copy(p.pos);
+      p.sprite.scale.set(0.16, 0.16, 1);
+    }
+  }
+
+  private spawnScorch(at: THREE.Vector3, dir: THREE.Vector3) {
+    const s = this.scorchPool.find((q) => !q.alive) ?? this.scorchPool[0];
+    s.alive = true;
+    s.life = 9;
+    s.sprite.position.copy(at).addScaledVector(dir, -0.03);
+    s.sprite.scale.setScalar(rnd(0.32, 0.5));
+    s.sprite.visible = true;
+    (s.sprite.material as THREE.SpriteMaterial).opacity = 0.85;
+    (s.sprite.material as THREE.SpriteMaterial).rotation = rnd(0, Math.PI * 2);
+  }
+
+  private spawnWisp(x: number, y: number, z: number, color: number) {
+    const w = this.wispPool.find((q) => !q.alive) ?? this.wispPool[0];
+    w.alive = true;
+    w.pos.set(x + rnd(-0.25, 0.25), y, z + rnd(-0.25, 0.25));
+    w.maxLife = rnd(0.7, 1.3);
+    w.life = w.maxLife;
+    w.seed = rnd(0, 10);
+    w.sprite.visible = true;
+    w.sprite.position.copy(w.pos);
+    (w.sprite.material as THREE.SpriteMaterial).color.set(color);
+  }
+
+  private spawnFlash(x: number, y: number, z: number, maxScale: number, color: number, maxLife = 0.3) {
+    const f = this.flashSprPool.find((q) => !q.alive) ?? this.flashSprPool[0];
+    f.alive = true;
+    f.maxScale = maxScale;
+    f.maxLife = maxLife;
+    f.life = maxLife;
+    f.sprite.position.set(x, y, z);
+    (f.sprite.material as THREE.SpriteMaterial).color.set(color);
+    f.sprite.visible = true;
+  }
+
+  private dumpCasings() {
+    const from = new THREE.Vector3();
+    this.chamber.getWorldPosition(from);
+    let dumped = 0;
+    for (const c of this.casingPool) {
+      if (c.alive || dumped >= 6) continue;
+      c.alive = true;
+      dumped++;
+      c.pos.copy(from).add(new THREE.Vector3(rnd(-0.05, 0.05), rnd(-0.02, 0.02), rnd(-0.05, 0.05)));
+      c.vel.set(rnd(-1.6, 1.6), rnd(2.2, 3.6), rnd(-1.6, 1.6));
+      c.spin.set(rnd(-14, 14), rnd(-14, 14), rnd(-14, 14));
+      c.life = 1.4;
+      c.mesh.visible = true;
+      c.mesh.position.copy(c.pos);
     }
   }
 
@@ -1345,7 +1651,9 @@ export class HexEngine {
 
   private tick(dtRaw: number) {
     this.clockT += dtRaw;
-    const slow = this.dead ? Math.max(0.25, 1 - this.deathT * 1.4) : 1;
+    this.killStopT = Math.max(0, this.killStopT - dtRaw);
+    const killSlow = this.killStopT > 0 ? 0.15 : 1;
+    const slow = (this.dead ? Math.max(0.25, 1 - this.deathT * 1.4) : 1) * killSlow;
     this.timeScale = slow;
     const dt = this.paused ? 0 : dtRaw * this.timeScale;
 
@@ -1447,6 +1755,8 @@ export class HexEngine {
         this.reloading = false;
         this.ammo = 6;
         this.audio.reloadSnap();
+        this.dumpCasings();
+        this.audio.casings();
       }
     }
   }
@@ -1456,6 +1766,10 @@ export class HexEngine {
   private updateCamera(dt: number) {
     if (this.state === "menu") {
       this.shake = 0;
+      if (Math.abs(this.camera.fov - this.fovBase) > 0.1) {
+        this.camera.fov = this.fovBase;
+        this.camera.updateProjectionMatrix();
+      }
       return;
     }
     const hSpeed = Math.hypot(this.vel.x, this.vel.z);
@@ -1469,18 +1783,21 @@ export class HexEngine {
       eyeY + rnd(-1, 1) * 0.05 * sh,
       this.pos.z + rnd(-1, 1) * 0.05 * sh
     );
-    this.recoilPitch = Math.max(0, this.recoilPitch - dt * 0.5);
+    this.recoilPitch = Math.max(0, this.recoilPitch - dt * 0.55);
     const deathRoll = this.dead ? Math.min(1.15, this.deathT * 0.75) : 0;
+    // heavy-cannon lens punch; sprint stretches the lens
+    this.fovKick = Math.max(0, this.fovKick - dt * 13);
+    this.rollKick *= Math.exp(-dt * 7);
     const sprinting = (this.keys.has("ShiftLeft") || this.keys.has("ShiftRight")) && hSpeed > 4 && this.grounded && !this.dead;
-    const targetFov = sprinting ? 81 : 74;
-    if (Math.abs(this.camera.fov - targetFov) > 0.05) {
-      this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 9);
+    const targetFov = (sprinting ? 81 : this.fovBase) + this.fovKick;
+    if (Math.abs(this.camera.fov - targetFov) > 0.04) {
+      this.camera.fov += (targetFov - this.camera.fov) * Math.min(1, dt * 11);
       this.camera.updateProjectionMatrix();
     }
     this.camera.rotation.set(
       this.pitch + this.recoilPitch + Math.sin(this.bobT * 1.9) * 0.008 * bobAmp,
       this.yaw,
-      Math.sin(this.bobT * 0.95) * 0.012 * bobAmp + rnd(-1, 1) * 0.02 * sh + deathRoll
+      Math.sin(this.bobT * 0.95) * 0.012 * bobAmp + rnd(-1, 1) * 0.02 * sh + this.rollKick + deathRoll
     );
   }
 
@@ -1490,30 +1807,45 @@ export class HexEngine {
     const t = this.clockT;
     const hSpeed = Math.hypot(this.vel.x, this.vel.z);
     const bobAmp = Math.min(1, hSpeed / 5);
-    const swayX = Math.sin(this.bobT * 0.95) * 0.014 * bobAmp;
-    const swayY = Math.abs(Math.sin(this.bobT * 1.9)) * -0.018 * bobAmp;
+    const swayX = Math.sin(this.bobT * 0.95) * 0.02 * bobAmp;
+    const swayY = Math.abs(Math.sin(this.bobT * 1.9)) * -0.026 * bobAmp;
 
-    this.vm.position.set(swayX, swayY, 0);
+    // the cannon is heavy — its sway lags the body
+    const lagK = 1 - Math.exp(-dt * 6.5);
+    this.vmLag.x += (swayX - this.vmLag.x) * lagK;
+    this.vmLag.y += (swayY - this.vmLag.y) * lagK;
+    this.vm.position.set(this.vmLag.x, this.vmLag.y, 0);
+    this.vm.rotation.z = this.vmLag.x * 0.6;
     this.vm.visible = this.state === "playing";
 
-    this.recoil = Math.max(0, this.recoil - dt * 7);
+    this.recoil = Math.max(0, this.recoil - dt * 6);
+    this.gunKick = Math.max(0, this.gunKick - dt * 5.5);
     this.castLunge = Math.max(0, this.castLunge - dt * 4.5);
     this.novaLunge = Math.max(0, this.novaLunge - dt * 3.5);
 
-    this.gunGroup.position.set(0.34 + swayX * 0.4, -0.31 + swayY, -0.58 + this.recoil * 0.08);
-    this.gunGroup.rotation.set(this.recoil * 0.22, 0, this.recoil * 0.05);
+    const kick = this.gunKick * this.gunKick;
+    this.gunGroup.position.set(
+      0.36 + this.vmLag.x * 0.4,
+      -0.33 + this.vmLag.y + kick * 0.035,
+      -0.6 + kick * 0.14
+    );
+    this.gunGroup.rotation.set(this.recoil * 0.3 + kick * 0.22, this.vmLag.x * 0.8, kick * 0.06 * this.fireSign);
     if (this.reloading) {
       const ph = this.reloadT / 1.15;
       const tilt = Math.sin(Math.min(1, ph * 1.3) * Math.PI) * 0.9;
       this.gunGroup.rotation.x -= tilt;
-      this.gunGroup.position.y -= tilt * 0.12;
+      this.gunGroup.position.y -= tilt * 0.14;
       this.chamber.rotation.y += dt * 14;
     }
 
     this.muzzleT = Math.max(0, this.muzzleT - dt);
     this.muzzleFlash.visible = this.muzzleT > 0;
-    if (this.muzzleT > 0) this.muzzleFlash.rotation.z = rnd(0, 6);
-    this.muzzleLight.intensity = Math.max(0, this.muzzleLight.intensity - dt * 500);
+    if (this.muzzleT > 0) {
+      this.muzzleFlash.rotation.z = rnd(0, 6);
+      const s = 0.8 + rnd(0, 0.55);
+      this.muzzleFlash.scale.set(s, s, s);
+    }
+    this.muzzleLight.intensity = Math.max(0, this.muzzleLight.intensity - dt * 600);
 
     // spell orb life
     const pulse = 0.85 + Math.sin(t * 3.2) * 0.15;
@@ -1654,6 +1986,19 @@ export class HexEngine {
       b.group.position.copy(b.pos);
       b.group.rotation.y += dt * 9;
       b.group.rotation.x += dt * 6;
+      // orbiting rune sigils
+      const orbiters = b.group.userData.orbiters as THREE.Sprite[] | undefined;
+      if (orbiters) {
+        b.group.userData.angle = ((b.group.userData.angle as number) ?? 0) + dt * 10;
+        const a = b.group.userData.angle as number;
+        for (let oi = 0; oi < orbiters.length; oi++) {
+          const oa = a + (oi * Math.PI * 2) / orbiters.length;
+          orbiters[oi].position.set(Math.cos(oa) * 0.4, Math.sin(oa * 1.7) * 0.15, Math.sin(oa) * 0.4);
+          (orbiters[oi].material as THREE.SpriteMaterial).opacity = 0.45 + 0.3 * Math.sin(oa * 2);
+        }
+      }
+      // hex trail
+      this.burst(b.pos.x, b.pos.y, b.pos.z, 2, 0.8, 0.28, COL_HEX);
       if (!lightSet) {
         this.boltLight.position.copy(b.pos);
         this.boltLight.intensity = 16;
@@ -1791,6 +2136,69 @@ export class HexEngine {
       tr.life -= dt;
       (tr.mesh.material as THREE.MeshBasicMaterial).opacity = Math.max(0, tr.life / 0.07) * 0.85;
       if (tr.life <= 0) tr.mesh.visible = false;
+    }
+    // muzzle smoke
+    for (const p of this.smokePool) {
+      if (!p.alive) continue;
+      p.life -= dt;
+      if (p.life <= 0) { p.alive = false; p.sprite.visible = false; continue; }
+      p.vel.x *= 1 - dt * 1.5;
+      p.vel.z *= 1 - dt * 1.5;
+      p.pos.addScaledVector(p.vel, dt);
+      p.sprite.position.copy(p.pos);
+      const s = p.sprite.scale.x + p.grow * dt;
+      p.sprite.scale.set(s, s, 1);
+      (p.sprite.material as THREE.SpriteMaterial).opacity = Math.min(0.5, (p.life / p.maxLife)) * 0.8;
+      (p.sprite.material as THREE.SpriteMaterial).rotation += dt * 0.6;
+    }
+    // scorch marks fade
+    for (const s of this.scorchPool) {
+      if (!s.alive) continue;
+      s.life -= dt;
+      if (s.life <= 0) { s.alive = false; s.sprite.visible = false; continue; }
+      (s.sprite.material as THREE.SpriteMaterial).opacity = Math.min(0.85, s.life / 2.5);
+    }
+    // soul wisps rise and gutter out
+    for (const w of this.wispPool) {
+      if (!w.alive) continue;
+      w.life -= dt;
+      if (w.life <= 0) { w.alive = false; w.sprite.visible = false; continue; }
+      w.pos.y += dt * 1.7;
+      w.pos.x += Math.sin(t * 5 + w.seed) * dt * 0.5;
+      w.pos.z += Math.cos(t * 4.2 + w.seed) * dt * 0.5;
+      w.sprite.position.copy(w.pos);
+      const k = w.life / w.maxLife;
+      const flick = 0.3 + 0.16 * Math.sin(t * 18 + w.seed * 3);
+      w.sprite.scale.set(flick, flick * 1.5, 1);
+      (w.sprite.material as THREE.SpriteMaterial).opacity = Math.min(1, k * 2) * 0.9;
+    }
+    // spent casings tumble
+    for (const c of this.casingPool) {
+      if (!c.alive) continue;
+      c.life -= dt;
+      if (c.life <= 0) { c.alive = false; c.mesh.visible = false; continue; }
+      c.vel.y -= 13 * dt;
+      c.pos.addScaledVector(c.vel, dt);
+      if (c.pos.y < 0.03) {
+        c.pos.y = 0.03;
+        c.vel.y *= -0.35;
+        c.vel.x *= 0.72;
+        c.vel.z *= 0.72;
+        c.spin.multiplyScalar(0.6);
+      }
+      c.mesh.position.copy(c.pos);
+      c.mesh.rotation.x += c.spin.x * dt;
+      c.mesh.rotation.z += c.spin.z * dt;
+    }
+    // spell flash blooms
+    for (const f of this.flashSprPool) {
+      if (!f.alive) continue;
+      f.life -= dt;
+      if (f.life <= 0) { f.alive = false; f.sprite.visible = false; continue; }
+      const k = 1 - f.life / f.maxLife;
+      const s = f.maxScale * (0.35 + 0.65 * Math.sqrt(k));
+      f.sprite.scale.set(s, s, 1);
+      (f.sprite.material as THREE.SpriteMaterial).opacity = (1 - k) * (1 - k) * 1.1;
     }
     // rings
     for (const r of this.rings) {
