@@ -32,9 +32,9 @@ export class HexAudio {
     }
   }
 
-  private noise(dur: number, vol: number, filterFreq: number, sweepTo?: number, type: BiquadFilterType = "lowpass") {
+  private noise(dur: number, vol: number, filterFreq: number, sweepTo?: number, type: BiquadFilterType = "lowpass", at = 0) {
     if (!this.ctx || !this.master || !this.noiseBuf) return;
-    const t = this.ctx.currentTime;
+    const t = this.ctx.currentTime + at;
     const src = this.ctx.createBufferSource();
     src.buffer = this.noiseBuf;
     src.loop = true;
@@ -50,9 +50,9 @@ export class HexAudio {
     src.stop(t + dur + 0.02);
   }
 
-  private tone(freq: number, endFreq: number, dur: number, vol: number, type: OscillatorType = "square") {
+  private tone(freq: number, endFreq: number, dur: number, vol: number, type: OscillatorType = "square", at = 0) {
     if (!this.ctx || !this.master) return;
-    const t = this.ctx.currentTime;
+    const t = this.ctx.currentTime + at;
     const o = this.ctx.createOscillator();
     o.type = type;
     o.frequency.setValueAtTime(freq, t);
@@ -177,6 +177,38 @@ export class HexAudio {
   spawnGrowl() {
     this.tone(70, 130, 0.4, 0.3, "sawtooth");
     this.noise(0.35, 0.25, 400, 100);
+  }
+  mortarFire() {
+    this.tone(110, 38, 0.34, 0.6, "sine");
+    this.noise(0.4, 0.5, 800, 140);
+    this.noise(0.12, 0.3, 3200, 700, "bandpass");
+  }
+  mortarBoom() {
+    this.noise(1.0, 1.0, 650, 45);
+    this.tone(100, 22, 0.8, 0.75, "sine");
+    this.noise(0.3, 0.5, 2600, 260, "bandpass", 0.02);
+  }
+  chainZap() {
+    this.noise(0.14, 0.5, 5400, 900, "highpass");
+    this.tone(1500, 240, 0.13, 0.26, "sawtooth");
+    this.tone(2300, 420, 0.09, 0.18, "square", 0.03);
+    this.noise(0.08, 0.35, 4200, 700, "highpass", 0.07);
+  }
+  lanceFire() {
+    this.tone(520, 85, 0.26, 0.42, "sawtooth");
+    this.noise(0.24, 0.42, 3400, 480, "bandpass");
+    this.tone(1040, 170, 0.18, 0.2, "square", 0.02);
+  }
+  tomePickup() {
+    this.tone(392, 392, 0.1, 0.2, "triangle");
+    this.tone(523, 523, 0.1, 0.2, "triangle", 0.09);
+    this.tone(784, 784, 0.16, 0.22, "triangle", 0.18);
+    this.tone(1568, 1568, 0.22, 0.1, "sine", 0.18);
+    this.noise(0.3, 0.15, 2000, 6000, "bandpass", 0.1);
+  }
+  spellSpent() {
+    this.tone(520, 180, 0.25, 0.2, "triangle");
+    this.tone(260, 120, 0.3, 0.16, "triangle", 0.12);
   }
   playerDeath() {
     this.tone(220, 30, 1.4, 0.5, "sawtooth");

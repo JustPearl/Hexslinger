@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { HexEngine, toRoman, type HudData, type GameEvent } from "./game/engine";
+import { HexEngine, toRoman, SPELLS, type HudData, type GameEvent, type SpellId } from "./game/engine";
 
 /* ============================ inline icons ============================ */
 
@@ -83,26 +83,91 @@ const BruteGlyph = () => (
 const DEFAULT_HUD: HudData = {
   hp: 100, maxHp: 100, souls: 100, maxSouls: 100, ammo: 6, maxAmmo: 6,
   reloading: false, reloadProgress: 0, score: 0, kills: 0, wave: 0, enemiesLeft: 0,
-  boltReady: 1, novaReady: 1, state: "menu", paused: false, muted: false, fps: 60,
+  slotReady: 1, equippedSpell: "hellbolt", spellCharges: 0, spellMax: 0,
+  novaReady: 1, state: "menu", paused: false, muted: false, fps: 60,
 };
 
-interface FeedItem { id: number; text: string; dying: boolean }
+interface FeedItem { id: number; text: string; dying: boolean; color?: string }
 
-function SpellSlot({ icon, label, keyName, cost, ready, affordable, tint }: {
-  icon: React.ReactNode; label: string; keyName: string; cost: number; ready: number; affordable: boolean; tint: string;
-}) {
-  const deg = Math.round((1 - Math.max(0, Math.min(1, ready))) * 360);
-  const isReady = ready >= 1;
-  const on = isReady && affordable;
+const MortarIcon = ({ size = 26 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <path d="M12 3c-3.4 0-5.5 2.5-5.5 6 0 2.7 1.4 4.8 3.5 5.6V17h4v-2.4c2.1-.8 3.5-2.9 3.5-5.6 0-3.5-2.1-6-5.5-6Z" stroke="currentColor" strokeWidth="1.7" />
+    <circle cx="9.8" cy="9" r="1.3" fill="currentColor" />
+    <circle cx="14.2" cy="9" r="1.3" fill="currentColor" />
+    <path d="M10.5 12.5h3M8 20h8M10 17v3M14 17v3" stroke="currentColor" strokeWidth="1.5" />
+  </svg>
+);
+
+const ChainIcon = ({ size = 26 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <path d="M13 2 5 13h5l-2 9 9-13h-5l3-7h-2Z" fill="currentColor" />
+  </svg>
+);
+
+const LanceIcon = ({ size = 26 }: { size?: number }) => (
+  <svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+    <path d="M21 3l-8.5 8.5M21 3l-1 5M21 3l-5 1" stroke="currentColor" strokeWidth="1.8" />
+    <path d="M12.5 11.5 3 21M6.5 14.5l3 3" stroke="currentColor" strokeWidth="1.8" />
+    <path d="M14 7.5l2.5 2.5" stroke="currentColor" strokeWidth="2.6" />
+  </svg>
+);
+
+function spellIcon(id: SpellId, size = 26) {
+  if (id === "mortar") return <MortarIcon size={size} />;
+  if (id === "chain") return <ChainIcon size={size} />;
+  if (id === "lance") return <LanceIcon size={size} />;
+  return <HellboltIcon size={size} />;
+}
+
+function HexSlot({ hud }: { hud: HudData }) {
+  const sp = SPELLS[hud.equippedSpell];
+  const ready = hud.slotReady >= 1;
+  const affordable = hud.souls >= sp.cost;
+  const on = ready && affordable;
+  const deg = Math.round((1 - Math.max(0, Math.min(1, hud.slotReady))) * 360);
+  const infinite = hud.spellMax === 0;
   return (
-    <div className={`relative w-[86px] border-2 px-1.5 py-1.5 text-center transition-colors ${on ? "bg-black/70" : "border-ash/50 bg-black/50"}`}
-      style={on ? { borderColor: tint } : undefined}>
-      <div className={`flex justify-center ${on ? "" : "text-ash/70"}`} style={on ? { color: tint, filter: `drop-shadow(0 0 6px ${tint}66)` } : undefined}>{icon}</div>
-      <div className="font-type text-[9px] tracking-[0.14em] text-bone/80 leading-tight mt-0.5">{label}</div>
-      <div className="font-type text-[8px] text-ash leading-none mt-0.5">
-        <kbd className="key !text-[8px] !px-1 !py-0">{keyName}</kbd> <span style={affordable ? { color: tint } : undefined} className={affordable ? "" : "text-bone"}>{cost}◈</span>
+    <div className="relative flex items-center gap-3 border-2 bg-black/70 px-3 py-2"
+      style={{ borderColor: on ? sp.css : "rgba(138,134,122,0.5)", boxShadow: on ? `0 0 18px ${sp.css}33, inset 0 0 14px ${sp.css}1a` : undefined }}>
+      <div className={on ? "" : "opacity-45"} style={on ? { color: sp.css, filter: `drop-shadow(0 0 7px ${sp.css}88)` } : { color: "#8a867a" }}>
+        {spellIcon(hud.equippedSpell, 30)}
       </div>
-      {!isReady && (
+      <div>
+        <div className="font-type text-[11px] leading-none tracking-[0.18em]" style={{ color: on ? sp.css : "#8a867a" }}>
+          {sp.name}
+        </div>
+        <div className="mt-1 flex items-center gap-2 text-[9px] leading-none text-ash">
+          <kbd className="key !text-[8px] !px-1 !py-0">RMB</kbd>
+          <span style={affordable ? { color: sp.css } : { color: "#e8e2d2" }}>{sp.cost}◈</span>
+          {infinite ? (
+            <span className="tracking-[0.14em] text-bone/70">SOUL-FED ∞</span>
+          ) : (
+            <span className="flex items-center gap-[2px]">
+              {Array.from({ length: hud.spellMax }).map((_, i) => (
+                <span key={i} className="inline-block h-2 w-[4px]"
+                  style={{ background: i < hud.spellCharges ? sp.css : "rgba(138,134,122,0.35)" }} />
+              ))}
+            </span>
+          )}
+        </div>
+      </div>
+      {!ready && (
+        <div className="absolute inset-0 pointer-events-none" style={{ background: `conic-gradient(rgba(6,6,6,0.82) ${deg}deg, transparent 0deg)` }} />
+      )}
+    </div>
+  );
+}
+
+function NovaChip({ hud }: { hud: HudData }) {
+  const on = hud.novaReady >= 1 && hud.souls >= 55;
+  const deg = Math.round((1 - Math.max(0, Math.min(1, hud.novaReady))) * 360);
+  return (
+    <div className={`relative border-2 px-2 py-2 text-center ${on ? "border-bone/70 bg-black/70" : "border-ash/40 bg-black/50"}`}>
+      <div className={`flex justify-center ${on ? "text-bone" : "text-ash/60"}`}><NovaIcon size={18} /></div>
+      <div className="mt-0.5 text-[8px] leading-none tracking-[0.14em] text-ash">
+        <kbd className="key !text-[8px] !px-1 !py-0">Q</kbd> 55◈
+      </div>
+      {!on && (
         <div className="absolute inset-0 pointer-events-none" style={{ background: `conic-gradient(rgba(6,6,6,0.82) ${deg}deg, transparent 0deg)` }} />
       )}
     </div>
@@ -139,8 +204,10 @@ export default function App() {
   const [dmgKey, setDmgKey] = useState(0);
   const [healKey, setHealKey] = useState(0);
   const [flashKey, setFlashKey] = useState(0);
+  const [flashColor, setFlashColor] = useState("#e8e2d2");
   const [banner, setBanner] = useState<{ key: number; wave: number; sub: string } | null>(null);
   const [deathStats, setDeathStats] = useState<GameEvent["stats"] | null>(null);
+  const [spellToast, setSpellToast] = useState<{ key: number; text: string; color: string } | null>(null);
   const [tipIdx, setTipIdx] = useState(0);
   const feedId = useRef(0);
 
@@ -157,10 +224,23 @@ export default function App() {
       case "hit": setHitKey((k) => k + 1); break;
       case "damage": setDmgKey((k) => k + 1); break;
       case "heal": setHealKey((k) => k + 1); break;
-      case "flash": setFlashKey((k) => k + 1); break;
+      case "flash": setFlashColor("#e8e2d2"); setFlashKey((k) => k + 1); break;
       case "empty": setShotKey((k) => k + 1); break;
       case "wave": setBanner({ key: (e.wave ?? 1) * 1000 + Date.now() % 1000, wave: e.wave ?? 1, sub: e.sub ?? "" }); break;
       case "dead": setDeathStats(e.stats ?? null); break;
+      case "spell": {
+        const color = e.color ?? "#e8e2d2";
+        const id = ++feedId.current;
+        const key = Date.now();
+        setFeed((f) => [...f.slice(-3), { id, text: e.text ?? "", dying: false, color }]);
+        setTimeout(() => setFeed((f) => f.map((i) => (i.id === id ? { ...i, dying: true } : i))), 3000);
+        setTimeout(() => setFeed((f) => f.filter((i) => i.id !== id)), 3600);
+        setSpellToast({ key, text: e.text ?? "", color });
+        setTimeout(() => setSpellToast((t) => (t && t.key === key ? null : t)), 2300);
+        setFlashColor(color);
+        setFlashKey((k) => k + 1);
+        break;
+      }
     }
   }, []);
 
@@ -212,7 +292,7 @@ export default function App() {
       {dmgKey > 0 && <div key={`d${dmgKey}`} className="dmg-flash pointer-events-none absolute inset-0 z-20" />}
       {healKey > 0 && <div key={`h${healKey}`} className="heal-flash pointer-events-none absolute inset-0 z-20" />}
       {flashKey > 0 && (
-        <div key={`f${flashKey}`} className="pointer-events-none absolute inset-0 z-20" style={{ background: "rgba(232,226,210,0.55)", animation: "dmg-out 0.45s ease-out forwards" }} />
+        <div key={`f${flashKey}`} className="pointer-events-none absolute inset-0 z-20" style={{ background: flashColor, opacity: 0.32, animation: "dmg-out 0.5s ease-out forwards" }} />
       )}
 
       {/* ============================ HUD ============================ */}
@@ -243,8 +323,9 @@ export default function App() {
           {/* top-right: kill feed */}
           <div className="absolute right-5 top-5 flex w-72 flex-col items-end gap-1.5">
             {feed.map((f) => (
-              <div key={f.id} className={`feed-in ${f.dying ? "feed-out" : ""} border-r-2 border-bone/70 bg-black/60 px-2.5 py-1 text-[11px] leading-snug text-bone/90`}>
-                <span className="mr-1.5 text-ash">†</span>{f.text}
+              <div key={f.id} className={`feed-in ${f.dying ? "feed-out" : ""} border-r-2 bg-black/60 px-2.5 py-1 text-[11px] leading-snug`}
+                style={{ borderColor: f.color ?? "rgba(232,226,210,0.7)", color: f.color ? f.color : "rgba(232,226,210,0.9)", textShadow: f.color ? `0 0 10px ${f.color}66` : undefined }}>
+                <span className="mr-1.5 opacity-60">†</span>{f.text}
               </div>
             ))}
             {hud.muted && <div className="mt-1 text-[10px] tracking-[0.25em] text-ash">SILENCED — [M]</div>}
@@ -293,11 +374,19 @@ export default function App() {
             )}
           </div>
 
-          {/* bottom-center: hexes */}
-          <div className="absolute bottom-6 left-1/2 flex -translate-x-1/2 items-end gap-3">
-            <SpellSlot icon={<HellboltIcon />} label="HELLBOLT" keyName="RMB" cost={30} ready={hud.boltReady} affordable={hud.souls >= 30} tint="#63d8ff" />
-            <SpellSlot icon={<NovaIcon />} label="GRAVE NOVA" keyName="Q" cost={55} ready={hud.novaReady} affordable={hud.souls >= 55} tint="#63d8ff" />
+          {/* bottom-center: the hex slot + fixed nova */}
+          <div className="absolute bottom-6 left-1/2 flex -translate-x-1/2 items-end gap-2.5">
+            <HexSlot hud={hud} />
+            <NovaChip hud={hud} />
           </div>
+
+          {/* grimoire toast */}
+          {spellToast && (
+            <div key={spellToast.key} className="spell-toast absolute bottom-28 left-1/2 -translate-x-1/2 font-display text-2xl font-bold tracking-[0.12em]"
+              style={{ color: spellToast.color, textShadow: `0 0 16px ${spellToast.color}aa, 3px 3px 0 #0a0a0a` }}>
+              {spellToast.text}
+            </div>
+          )}
 
           {/* wave banner */}
           {banner && (
@@ -343,11 +432,14 @@ export default function App() {
               </div>
               <div className="mt-6 flex flex-wrap gap-x-5 gap-y-2 text-[10px] tracking-[0.18em] text-ash">
                 <span><kbd className="key">W</kbd><kbd className="key">A</kbd><kbd className="key">S</kbd><kbd className="key">D</kbd> MOVE</span>
-                <span><kbd className="key">LMB</kbd> REVOLVER</span>
-                <span><kbd className="key">RMB</kbd> HELLBOLT</span>
+                <span><kbd className="key">LMB</kbd> HANDCANNON</span>
+                <span><kbd className="key">RMB</kbd> HEX SLOT</span>
                 <span><kbd className="key">Q</kbd> NOVA</span>
                 <span><kbd className="key">SHIFT</kbd> SPRINT</span>
                 <span><kbd className="key">SPACE</kbd> VAULT</span>
+              </div>
+              <div className="mt-3 text-[10px] tracking-[0.14em] text-ash/80">
+                GRIMOIRES DROP FROM THE RABBLE — SEIZE THEM TO SWAP YOUR HEX.
               </div>
             </div>
 
@@ -375,7 +467,8 @@ export default function App() {
                 </div>
               </div>
               <div className="mt-5 border-t border-bone/30 pt-3 text-[10px] leading-relaxed tracking-[0.12em] text-ash">
-                PAYMENT IN SOULS ◈ — HELLBOLT 30, GRAVE NOVA 55.<br />
+                ONE HEX SLOT ◈ — HELLBOLT IS SOUL-FED FOREVER.<br />
+                SKULLMORTAR · CHAIN HEX · CRIMSON LANCE DROP AS GRIMOIRES, CHARGES AND ALL.<br />
                 SOULS REGROW. GREED DOESN'T RELOAD.
               </div>
             </div>

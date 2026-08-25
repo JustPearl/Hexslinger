@@ -30,7 +30,10 @@ export interface HudData {
   kills: number;
   wave: number;
   enemiesLeft: number;
-  boltReady: number; // 0..1
+  slotReady: number; // 0..1 cooldown of equipped hex
+  equippedSpell: SpellId;
+  spellCharges: number;
+  spellMax: number; // 0 = infinite
   novaReady: number; // 0..1
   state: EngineState;
   paused: boolean;
@@ -39,10 +42,11 @@ export interface HudData {
 }
 
 export interface GameEvent {
-  type: "kill" | "damage" | "hit" | "wave" | "dead" | "heal" | "flash" | "empty";
+  type: "kill" | "damage" | "hit" | "wave" | "dead" | "heal" | "flash" | "empty" | "spell";
   text?: string;
   wave?: number;
   sub?: string;
+  color?: string;
   stats?: { score: number; kills: number; wave: number; accuracy: number };
 }
 
@@ -60,6 +64,40 @@ const ENEMY_DEFS: Record<string, EnemyDef> = {
   goblin: { hp: 62, speed: 3.5, dmg: 10, range: 1.55, rate: 1.15, value: 100, radius: 0.45 },
   wraith: { hp: 85, speed: 4.3, dmg: 14, range: 1.4, rate: 0.95, value: 150, radius: 0.42 },
   brute: { hp: 235, speed: 2.0, dmg: 22, range: 2.1, rate: 1.75, value: 250, radius: 0.85 },
+};
+
+/* ---------- hexcraft: one slot, many grimoires ---------- */
+
+export type SpellId = "hellbolt" | "mortar" | "chain" | "lance";
+
+export interface SpellDef {
+  name: string;
+  color: number;
+  css: string;
+  rgb: [number, number, number];
+  cost: number;
+  charges: number; // 0 = soul-fed, infinite
+  cd: number;
+  blurb: string;
+}
+
+export const SPELLS: Record<SpellId, SpellDef> = {
+  hellbolt: {
+    name: "HELLBOLT", color: 0x63d8ff, css: "#63d8ff", rgb: [0.42, 0.86, 1],
+    cost: 30, charges: 0, cd: 0.55, blurb: "The bread-and-butter curse. Straight flight, hex blast.",
+  },
+  mortar: {
+    name: "SKULLMORTAR", color: 0x7dffa8, css: "#7dffa8", rgb: [0.49, 1, 0.66],
+    cost: 36, charges: 10, cd: 0.85, blurb: "A screaming skull on a grave arc. Big dirty bloom.",
+  },
+  chain: {
+    name: "CHAIN HEX", color: 0xbd8cff, css: "#bd8cff", rgb: [0.74, 0.55, 1],
+    cost: 34, charges: 14, cd: 0.34, blurb: "Lightning that skips skull to skull. Up to four.",
+  },
+  lance: {
+    name: "CRIMSON LANCE", color: 0xff5a64, css: "#ff5a64", rgb: [1, 0.35, 0.39],
+    cost: 42, charges: 9, cd: 0.65, blurb: "A blood needle that spits through the whole line.",
+  },
 };
 
 interface Enemy {
@@ -89,7 +127,8 @@ interface Enemy {
 
 interface Pickup {
   group: THREE.Group;
-  kind: "heart" | "soul";
+  kind: "heart" | "soul" | "tome";
+  spell?: SpellId;
   pos: THREE.Vector3;
   life: number;
   spin: number;
@@ -101,6 +140,10 @@ interface Bolt {
   vel: THREE.Vector3;
   life: number;
   alive: boolean;
+  spell: SpellId;
+  grav: number;
+  hitIds: Set<number>;
+  trail: number;
 }
 
 interface Ring {
@@ -261,6 +304,9 @@ export class HexEngine {
   private recoilPitch = 0;
   private boltCd = 0;
   private novaCd = 0;
+  private equipped: SpellId = "hellbolt";
+  private spellCharges = 0;
+  private tomePity = 0;
   private castLunge = 0;
   private novaLunge = 0;
   private shotsFired = 0;
@@ -323,6 +369,7 @@ export class HexEngine {
   private wispPool: Wisp[] = [];
   private casingPool: Casing[] = [];
   private flashSprPool: FlashSpr[] = [];
+  private beamPool: { line: THREE.Line; geo: THREE.BufferGeometry; mat: THREE.LineBasicMaterial; life: number }[] = [];
   private smokeTex!: THREE.Texture;
   private scorchTex!: THREE.Texture;
   private flameTex!: THREE.Texture;
@@ -856,6 +903,20 @@ export class HexEngine {
       this.scene.add(sprite);
       this.flashSprPool.push({ sprite, life: 0, maxLife: 0.3, maxScale: 4, alive: false });
     }
+    // chain-hex lightning beams
+    for (let i = 0; i < 10; i++) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(12 * 3), 3));
+      const mat = new THREE.LineBasicMaterial({
+        color: 0xbd8cff, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      });
+      const line = new THREE.Line(geo, mat);
+      line.frustumCulled = false;
+      line.visible = false;
+      this.scene.add(line);
+      this.beamPool.push({ line, geo, mat, life: 0 });
+    }
   }
 
   /* ------------------------------ input ------------------------------ */
@@ -894,7 +955,7 @@ export class HexEngine {
       this.tryLock();
     }
     if (e.button === 0) this.tryFire();
-    if (e.button === 2) this.castBolt();
+    if (e.button === 2) this.castSpell();
   };
   private onMouseUp = () => { this.dragging = false; };
   private onLockChange = () => {
@@ -939,6 +1000,7 @@ export class HexEngine {
     this.clearWorld();
     this.hp = 100; this.souls = 100; this.ammo = 6;
     this.reloading = false; this.fireCd = 0; this.boltCd = 0; this.novaCd = 0;
+    this.equipped = "hellbolt"; this.spellCharges = 0; this.tomePity = 0;
     this.score = 0; this.kills = 0; this.wave = 0;
     this.shotsFired = 0; this.shotsHit = 0;
     this.dead = false; this.deathT = 0; this.timeScale = 1;
@@ -1219,9 +1281,18 @@ export class HexEngine {
     for (let k = 0; k < (e.type === "brute" ? 5 : 3); k++) this.spawnWisp(e.pos.x, top * 0.5, e.pos.z, 0xe9e2cd);
     this.killStopT = 0.05;
     // drops
-    const roll = Math.random();
-    if (roll < 0.16) this.dropPickup(e.pos.x, e.pos.z, "heart");
-    else if (roll < 0.5) this.dropPickup(e.pos.x, e.pos.z, "soul");
+    // grimoire raids: pity-weighted tome drops
+    this.tomePity++;
+    const tomeChance = Math.min(0.5, 0.07 + this.tomePity * 0.035);
+    if (Math.random() < tomeChance) {
+      this.tomePity = 0;
+      const grimoires: SpellId[] = ["mortar", "chain", "lance"];
+      this.dropPickup(e.pos.x, e.pos.z, "tome", pick(grimoires));
+    } else {
+      const roll = Math.random();
+      if (roll < 0.16) this.dropPickup(e.pos.x, e.pos.z, "heart");
+      else if (roll < 0.5) this.dropPickup(e.pos.x, e.pos.z, "soul");
+    }
     this.enemyRoot.remove(e.group);
     e.group.traverse((o) => {
       const mesh = o as THREE.Mesh;
@@ -1236,8 +1307,39 @@ export class HexEngine {
 
   /* ------------------------------ pickups ------------------------------ */
 
-  private dropPickup(x: number, z: number, kind: "heart" | "soul") {
+  private dropPickup(x: number, z: number, kind: "heart" | "soul" | "tome", spell?: SpellId) {
     const g = new THREE.Group();
+    if (kind === "tome" && spell) {
+      const sp = SPELLS[spell];
+      const coverM = new THREE.MeshLambertMaterial({ color: 0x17171a, emissive: sp.color, emissiveIntensity: 0.25 });
+      const pageM = new THREE.MeshLambertMaterial({ color: 0xcfc8b4 });
+      const cover = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.46, 0.09), coverM);
+      cover.position.y = 0.72;
+      const pages = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.4, 0.07), pageM);
+      pages.position.set(0.015, 0.72, 0);
+      const sigil = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.runeTex, color: sp.color, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.95, depthWrite: false }));
+      sigil.position.set(0, 0.72, 0.09);
+      sigil.scale.set(0.24, 0.24, 1);
+      const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: sp.color, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.8, depthWrite: false }));
+      glow.position.y = 0.72;
+      glow.scale.set(1.7, 1.7, 1);
+      const beam = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.24, 0.42, 3.4, 8, 1, true),
+        new THREE.MeshBasicMaterial({ color: sp.color, transparent: true, opacity: 0.13, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide })
+      );
+      beam.position.y = 1.7;
+      const base = new THREE.Mesh(
+        new THREE.RingGeometry(0.3, 0.42, 20),
+        new THREE.MeshBasicMaterial({ color: sp.color, transparent: true, opacity: 0.5, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide })
+      );
+      base.rotation.x = -Math.PI / 2;
+      base.position.y = 0.03;
+      g.add(cover, pages, sigil, glow, beam, base);
+      g.position.set(x, 0, z);
+      this.scene.add(g);
+      this.pickups.push({ group: g, kind, spell, pos: new THREE.Vector3(x, 0, z), life: 20, spin: rnd(0, 6) });
+      return;
+    }
     const m = new THREE.MeshBasicMaterial({ color: kind === "heart" ? 0xe9e2cd : 0xb9b2a0 });
     if (kind === "heart") {
       const b = (px: number, py: number, s: number) => {
@@ -1274,8 +1376,13 @@ export class HexEngine {
         p.pos.x += (dx / (d || 1)) * dt * 6;
         p.pos.z += (dz / (d || 1)) * dt * 6;
       }
-      p.group.position.set(p.pos.x, 0, p.pos.z);
-      p.group.rotation.y = p.spin;
+      if (p.kind === "tome") {
+        p.group.position.set(p.pos.x, Math.sin(p.spin * 1.6) * 0.08, p.pos.z);
+        p.group.rotation.y = p.spin * 0.8;
+      } else {
+        p.group.position.set(p.pos.x, 0, p.pos.z);
+        p.group.rotation.y = p.spin;
+      }
       const blink = p.life < 3 ? (Math.floor(p.life * 6) % 2 === 0 ? 0.25 : 1) : 1;
       p.group.scale.setScalar(blink * (p.kind === "heart" ? 1 : 1 + Math.sin(p.spin * 2) * 0.08));
       if (d < 1.05 && !this.dead) {
@@ -1283,6 +1390,16 @@ export class HexEngine {
           this.hp = Math.min(100, this.hp + 25);
           this.audio.pickupHeart();
           this.onEvent({ type: "heal" });
+        } else if (p.kind === "tome" && p.spell) {
+          const sp = SPELLS[p.spell];
+          this.equipped = p.spell;
+          this.spellCharges = sp.charges;
+          this.score += 150;
+          this.audio.tomePickup();
+          this.onEvent({ type: "spell", text: `${sp.name} SEIZED ×${sp.charges}`, color: sp.css });
+          this.showDamage(this.pos.x, 2.3, this.pos.z, sp.name, true);
+          for (let k = 0; k < 7; k++) this.spawnWisp(p.pos.x, 0.6, p.pos.z, sp.color);
+          this.burst(p.pos.x, 0.8, p.pos.z, 14, 4, 0.6, sp.rgb);
         } else {
           this.souls = Math.min(100, this.souls + 18);
           this.audio.pickupSoul();
@@ -1370,43 +1487,203 @@ export class HexEngine {
     this.audio.reloadSpin();
   }
 
-  private castBolt() {
+  /* ---------- hex slot: one slot, many grimoires ---------- */
+
+  private castSpell() {
     if (this.boltCd > 0 || this.dead || this.reloading) return;
-    if (this.souls < 30) { this.audio.dryFire(); return; }
-    this.souls -= 30;
-    this.boltCd = 0.55;
+    const id = this.equipped;
+    const sp = SPELLS[id];
+    if (id === "chain" && !this.findChainFirst()) {
+      // nothing to arc into — half-cock the hex
+      this.boltCd = 0.12;
+      this.audio.dryFire();
+      return;
+    }
+    if (this.souls < sp.cost) { this.audio.dryFire(); return; }
+
+    this.souls -= sp.cost;
+    if (id !== "hellbolt") {
+      this.spellCharges--;
+      if (this.spellCharges <= 0) {
+        this.equipped = "hellbolt";
+        this.audio.spellSpent();
+        this.onEvent({ type: "spell", text: "GRIMOIRE SPENT — HELLBOLT RESTORED", color: "#e8e2d2" });
+      }
+    }
+    this.boltCd = sp.cd;
     this.castLunge = 1;
-    this.audio.cast();
+    this.boltLight.color.set(sp.color);
+
+    const hand = new THREE.Vector3();
+    this.spellOrb.getWorldPosition(hand);
+
+    if (id === "chain") {
+      this.castChain(sp);
+      return;
+    }
+
+    if (id === "hellbolt") this.audio.cast();
+    if (id === "mortar") this.audio.mortarFire();
+    if (id === "lance") this.audio.lanceFire();
 
     const g = new THREE.Group();
-    const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.16, 0), new THREE.MeshBasicMaterial({ color: C_SPELL_HOT }));
-    const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: C_SPELL, blending: THREE.AdditiveBlending, depthWrite: false }));
-    glow.scale.set(2.1, 2.1, 1);
-    const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.runeTex, color: C_SPELL, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.5, depthWrite: false }));
-    halo.scale.set(1.1, 1.1, 1);
-    g.add(core, glow, halo);
-    const orbiters: THREE.Sprite[] = [];
-    for (let oi = 0; oi < 3; oi++) {
-      const rs = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.runeTex, color: C_SPELL, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.7, depthWrite: false }));
-      rs.scale.set(0.3, 0.3, 1);
-      g.add(rs);
-      orbiters.push(rs);
-    }
-    g.userData.orbiters = orbiters;
-    g.userData.angle = rnd(0, 6);
     const dir = new THREE.Vector3();
     this.camera.getWorldDirection(dir);
     const start = this.camera.position.clone().addScaledVector(dir, 0.6);
-    start.y -= 0.15;
+    start.y -= 0.12;
+    let vel = dir.clone();
+    let grav = 0;
+    let life = 3;
+
+    if (id === "hellbolt") {
+      const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.16, 0), new THREE.MeshBasicMaterial({ color: C_SPELL_HOT }));
+      const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: sp.color, blending: THREE.AdditiveBlending, depthWrite: false }));
+      glow.scale.set(2.1, 2.1, 1);
+      const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.runeTex, color: sp.color, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.5, depthWrite: false }));
+      halo.scale.set(1.1, 1.1, 1);
+      g.add(core, glow, halo);
+      const orbiters: THREE.Sprite[] = [];
+      for (let oi = 0; oi < 3; oi++) {
+        const rs = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.runeTex, color: sp.color, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.7, depthWrite: false }));
+        rs.scale.set(0.3, 0.3, 1);
+        g.add(rs);
+        orbiters.push(rs);
+      }
+      g.userData.orbiters = orbiters;
+      g.userData.angle = rnd(0, 6);
+      vel.multiplyScalar(17);
+    } else if (id === "mortar") {
+      const skull = this.buildSkull(sp.color);
+      g.add(skull);
+      const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: sp.color, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.55, depthWrite: false }));
+      glow.scale.set(1.5, 1.5, 1);
+      g.add(glow);
+      vel = dir.clone().multiplyScalar(12.5);
+      vel.y += 7.6;
+      grav = 16;
+      life = 4;
+    } else if (id === "lance") {
+      const needleM = new THREE.MeshBasicMaterial({ color: 0xffe9ea });
+      const needle = new THREE.Mesh(new THREE.ConeGeometry(0.055, 1.0, 6), needleM);
+      needle.rotation.x = Math.PI / 2;
+      needle.position.z = 0.3;
+      const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.03, 1.6, 5), new THREE.MeshBasicMaterial({ color: sp.color }));
+      shaft.rotation.x = Math.PI / 2;
+      shaft.position.z = -0.6;
+      const glow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: sp.color, blending: THREE.AdditiveBlending, depthWrite: false }));
+      glow.scale.set(1.15, 1.15, 1);
+      glow.position.z = 0.4;
+      const streak = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: sp.color, blending: THREE.AdditiveBlending, transparent: true, opacity: 0.5, depthWrite: false }));
+      streak.scale.set(0.4, 0.4, 1);
+      streak.position.z = -1.2;
+      g.add(needle, shaft, glow, streak);
+      vel.multiplyScalar(33);
+      life = 1.15;
+    }
+
     g.position.copy(start);
     this.scene.add(g);
-    this.bolts.push({ group: g, pos: start.clone(), vel: dir.multiplyScalar(17), life: 3, alive: true });
+    this.bolts.push({ group: g, pos: start.clone(), vel, life, alive: true, spell: id, grav, hitIds: new Set(), trail: 0 });
 
     // hex discharge at the casting hand
+    this.spawnFlash(hand.x, hand.y, hand.z, id === "mortar" ? 2.4 : 1.6, sp.color, 0.22);
+    this.burst(hand.x, hand.y, hand.z, 8, 2.5, 0.3, sp.rgb);
+    if (id === "mortar") this.spawnSmoke(hand, dir, 3, sp.color);
+  }
+
+  private buildSkull(color: number): THREE.Group {
+    const s = new THREE.Group();
+    const boneM = new THREE.MeshLambertMaterial({ color: 0xd8d2c2, emissive: color, emissiveIntensity: 0.55 });
+    const darkM = new THREE.MeshBasicMaterial({ color: 0x050505 });
+    const cranium = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.3, 0.36), boneM);
+    cranium.position.y = 0.05;
+    const brow = new THREE.Mesh(new THREE.BoxGeometry(0.36, 0.08, 0.1), boneM);
+    brow.position.set(0, 0.1, 0.17);
+    const jaw = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.12, 0.26), boneM);
+    jaw.position.set(0, -0.14, 0.03);
+    const eyeL = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.08, 0.04), darkM);
+    eyeL.position.set(-0.08, 0.06, 0.185);
+    const eyeR = eyeL.clone();
+    eyeR.position.x = 0.08;
+    const nose = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.07, 0.04), darkM);
+    nose.position.set(0, -0.02, 0.185);
+    const hornGeo = new THREE.ConeGeometry(0.045, 0.2, 5);
+    const hornL = new THREE.Mesh(hornGeo, boneM);
+    hornL.position.set(-0.16, 0.22, 0);
+    hornL.rotation.z = 0.7;
+    const hornR = new THREE.Mesh(hornGeo, boneM);
+    hornR.position.set(0.16, 0.22, 0);
+    hornR.rotation.z = -0.7;
+    s.add(cranium, brow, jaw, eyeL, eyeR, nose, hornL, hornR);
+    return s;
+  }
+
+  /* ---------- chain hex ---------- */
+
+  private findChainFirst(): Enemy | null {
+    const origin = this.camera.position;
+    const dir = new THREE.Vector3();
+    this.camera.getWorldDirection(dir);
+    let best: Enemy | null = null;
+    let bestScore = 1e9;
+    for (const e of this.enemies) {
+      if (e.dead || e.spawnT < 1) continue;
+      const c = new THREE.Vector3(e.pos.x, e.pos.y + this.enemyTop(e) * 0.5, e.pos.z);
+      const to = c.clone().sub(origin);
+      const dist = to.length();
+      if (dist > 18) continue;
+      const dot = to.normalize().dot(dir);
+      if (dot < 0.45) continue;
+      const score = dist * (1.25 - dot);
+      if (score < bestScore) { bestScore = score; best = e; }
+    }
+    if (!best) {
+      for (const e of this.enemies) {
+        if (e.dead || e.spawnT < 1) continue;
+        const d = e.pos.distanceTo(origin);
+        if (d < 11 && d < bestScore) { bestScore = d; best = e; }
+      }
+    }
+    return best;
+  }
+
+  private castChain(sp: SpellDef) {
+    this.audio.chainZap();
+    const first = this.findChainFirst();
+    if (!first) return;
+    const alive = this.enemies.filter((e) => !e.dead && e.spawnT >= 1);
+    const path: Enemy[] = [first];
+    let cur = first;
+    while (path.length < 4) {
+      let next: Enemy | null = null;
+      let bd = 6.5;
+      for (const e of alive) {
+        if (path.includes(e)) continue;
+        const d = e.pos.distanceTo(cur.pos);
+        if (d < bd) { bd = d; next = e; }
+      }
+      if (!next) break;
+      path.push(next);
+      cur = next;
+    }
     const hand = new THREE.Vector3();
     this.spellOrb.getWorldPosition(hand);
-    this.spawnFlash(hand.x, hand.y, hand.z, 1.6, C_SPELL, 0.22);
-    this.burst(hand.x, hand.y, hand.z, 8, 2.5, 0.3, COL_HEX);
+    let from = hand;
+    for (let i = 0; i < path.length; i++) {
+      const e = path[i];
+      const c = new THREE.Vector3(e.pos.x, e.pos.y + this.enemyTop(e) * 0.5, e.pos.z);
+      this.spawnBeam(from, c, sp.color);
+      this.spawnFlash(c.x, c.y, c.z, 1.25, sp.color, 0.16);
+      this.burst(c.x, c.y, c.z, 6, 3.2, 0.35, sp.rgb);
+      this.damageEnemy(e, 40 * Math.pow(0.85, i));
+      from = c;
+    }
+    const fp = new THREE.Vector3(first.pos.x, first.pos.y + 1, first.pos.z);
+    this.flashLight.position.copy(fp);
+    this.flashLight.color.set(sp.color);
+    this.flashLight.intensity = 55;
+    this.flashLightT = 0.22;
+    this.addShake(0.16);
   }
 
   private castNova() {
@@ -1421,6 +1698,7 @@ export class HexEngine {
     this.spawnFlash(this.pos.x, 0.6, this.pos.z, 7.5, C_SPELL, 0.45);
     this.spawnFlash(this.pos.x, 1.1, this.pos.z, 3, C_SPELL_HOT, 0.2);
     this.flashLight.position.set(this.pos.x, 1.4, this.pos.z);
+    this.flashLight.color.set(C_SPELL);
     this.flashLight.intensity = 120;
     this.flashLightT = 0.35;
     this.burstChunks(this.pos.x, 0.8, this.pos.z, 26, 8);
@@ -1446,41 +1724,101 @@ export class HexEngine {
   private explodeBolt(b: Bolt) {
     b.alive = false;
     this.scene.remove(b.group);
+    const sp = SPELLS[b.spell];
+
+    // the lance just dies where it sticks
+    if (b.spell === "lance") {
+      this.spawnFlash(b.pos.x, b.pos.y, b.pos.z, 1.2, sp.color, 0.2);
+      this.burst(b.pos.x, b.pos.y, b.pos.z, 10, 4, 0.45, sp.rgb);
+      this.audio.hitEnemy();
+      return;
+    }
+
+    const big = b.spell === "mortar";
+    const radius = big ? 4.8 : 3.6;
+    const dmg = big ? 74 : 58;
     this.audio.explosion();
-    this.spawnRing(b.pos.x, 0.1, b.pos.z, 4.4, 0.4);
-    this.spawnRing(b.pos.x, 0.14, b.pos.z, 2.6, 0.62);
-    this.spawnFlash(b.pos.x, b.pos.y, b.pos.z, 5, C_SPELL, 0.34);
-    this.spawnFlash(b.pos.x, b.pos.y, b.pos.z, 2.2, C_SPELL_HOT, 0.18);
+    if (big) this.audio.mortarBoom();
+    this.spawnRing(b.pos.x, 0.1, b.pos.z, big ? 5.8 : 4.4, big ? 0.55 : 0.4, sp.color);
+    this.spawnRing(b.pos.x, 0.14, b.pos.z, big ? 3.4 : 2.6, big ? 0.75 : 0.62, sp.color);
+    this.spawnFlash(b.pos.x, b.pos.y, b.pos.z, big ? 7 : 5, sp.color, big ? 0.4 : 0.34);
+    this.spawnFlash(b.pos.x, b.pos.y, b.pos.z, big ? 3.2 : 2.2, 0xffffff, 0.16);
     this.flashLight.position.set(b.pos.x, 1.0, b.pos.z);
-    this.flashLight.intensity = 95;
-    this.flashLightT = 0.3;
-    this.addShake(0.35);
-    this.burstChunks(b.pos.x, b.pos.y, b.pos.z, 20, 6.5);
-    this.burst(b.pos.x, b.pos.y, b.pos.z, 18, 8, 0.9, COL_HEX);
+    this.flashLight.color.set(sp.color);
+    this.flashLight.intensity = big ? 130 : 95;
+    this.flashLightT = big ? 0.4 : 0.3;
+    this.addShake(big ? 0.55 : 0.35);
+    this.burstChunks(b.pos.x, Math.max(0.3, b.pos.y), b.pos.z, big ? 26 : 20, big ? 8 : 6.5);
+    this.burst(b.pos.x, b.pos.y, b.pos.z, big ? 26 : 18, big ? 9 : 8, 0.9, sp.rgb);
     this.burst(b.pos.x, b.pos.y, b.pos.z, 10, 4, 0.5, COL_BONE);
-    for (let k = 0; k < 5; k++) this.spawnWisp(b.pos.x, b.pos.y, b.pos.z, C_SPELL);
+    if (big) {
+      const back = new THREE.Vector3(0, 1, 0);
+      this.spawnSmoke(b.pos, back, 6, sp.color);
+    }
+    for (let k = 0; k < (big ? 8 : 5); k++) this.spawnWisp(b.pos.x, b.pos.y, b.pos.z, sp.color);
     for (const e of this.enemies) {
       if (e.dead) continue;
       const dx = e.pos.x - b.pos.x;
       const dy = this.enemyTop(e) * 0.5 - b.pos.y;
       const dz = e.pos.z - b.pos.z;
       const d = Math.hypot(dx, dz, dy * 0.5);
-      if (d < 3.6) {
-        const fall = 1 - (d / 3.6) * 0.5;
+      if (d < radius) {
+        const fall = 1 - (d / radius) * 0.5;
         const hd = Math.hypot(dx, dz) || 1;
-        this.damageEnemy(e, 58 * fall, (dx / hd) * 5, (dz / hd) * 5);
+        this.damageEnemy(e, dmg * fall, (dx / hd) * 5, (dz / hd) * 5);
       }
     }
   }
 
-  private spawnRing(x: number, y: number, z: number, maxR: number, maxT: number) {
+  private spawnRing(x: number, y: number, z: number, maxR: number, maxT: number, color = C_SPELL) {
     const r = this.rings.find((q) => !q.alive) ?? this.rings[0];
     r.alive = true;
     r.t = 0;
     r.maxR = maxR;
     r.maxT = maxT;
+    (r.mesh.material as THREE.MeshBasicMaterial).color.set(color);
     r.mesh.position.set(x, y, z);
     r.mesh.visible = true;
+  }
+
+  /* ---------- chain-hex lightning ---------- */
+
+  private spawnBeam(a: THREE.Vector3, b: THREE.Vector3, color: number) {
+    const beam = this.beamPool.find((q) => q.life <= 0) ?? this.beamPool[0];
+    const SEG = 11;
+    const pos = beam.geo.attributes.position as THREE.BufferAttribute;
+    const d = b.clone().sub(a);
+    const len = d.length();
+    d.normalize();
+    let perp = new THREE.Vector3().crossVectors(d, new THREE.Vector3(0, 1, 0));
+    if (perp.lengthSq() < 0.01) perp.set(1, 0, 0);
+    perp.normalize();
+    const perp2 = new THREE.Vector3().crossVectors(d, perp).normalize();
+    for (let k = 0; k <= SEG; k++) {
+      const t = k / SEG;
+      const p = a.clone().addScaledVector(b.clone().sub(a), t);
+      if (k > 0 && k < SEG) {
+        const jag = len * 0.055 * Math.sin(t * Math.PI);
+        p.addScaledVector(perp, rnd(-jag, jag));
+        p.addScaledVector(perp2, rnd(-jag, jag));
+      }
+      pos.setXYZ(k, p.x, p.y, p.z);
+    }
+    pos.needsUpdate = true;
+    beam.mat.color.set(color);
+    beam.mat.opacity = 1;
+    beam.life = 0.17;
+    beam.line.visible = true;
+    // a second, fatter ghost pass for glow weight
+    const ghost = this.beamPool.find((q) => q.life <= 0 && q !== beam) ?? this.beamPool[1];
+    if (ghost && ghost !== beam) {
+      (ghost.geo.attributes.position as THREE.BufferAttribute).copy(pos);
+      (ghost.geo.attributes.position as THREE.BufferAttribute).needsUpdate = true;
+      ghost.mat.color.set(0xffffff);
+      ghost.mat.opacity = 0.85;
+      ghost.life = 0.1;
+      ghost.line.visible = true;
+    }
   }
 
   private spawnTracer(end: THREE.Vector3, dist: number) {
@@ -1519,7 +1857,7 @@ export class HexEngine {
     }
   }
 
-  private spawnSmoke(at: THREE.Vector3, dir: THREE.Vector3, n: number) {
+  private spawnSmoke(at: THREE.Vector3, dir: THREE.Vector3, n: number, tint = 0xd8d2bd) {
     for (let k = 0; k < n; k++) {
       const p = this.smokePool.find((q) => !q.alive) ?? this.smokePool[0];
       p.alive = true;
@@ -1528,6 +1866,7 @@ export class HexEngine {
       p.maxLife = rnd(0.8, 1.4);
       p.life = p.maxLife;
       p.grow = rnd(0.55, 0.85);
+      (p.sprite.material as THREE.SpriteMaterial).color.set(tint);
       p.sprite.visible = true;
       p.sprite.position.copy(p.pos);
       p.sprite.scale.set(0.16, 0.16, 1);
@@ -1981,30 +2320,74 @@ export class HexEngine {
     for (let i = this.bolts.length - 1; i >= 0; i--) {
       const b = this.bolts[i];
       if (!b.alive) { this.bolts.splice(i, 1); continue; }
+      const sp = SPELLS[b.spell];
       b.life -= dt;
+      if (b.grav > 0) b.vel.y -= b.grav * dt;
       b.pos.addScaledVector(b.vel, dt);
       b.group.position.copy(b.pos);
-      b.group.rotation.y += dt * 9;
-      b.group.rotation.x += dt * 6;
-      // orbiting rune sigils
-      const orbiters = b.group.userData.orbiters as THREE.Sprite[] | undefined;
-      if (orbiters) {
-        b.group.userData.angle = ((b.group.userData.angle as number) ?? 0) + dt * 10;
-        const a = b.group.userData.angle as number;
-        for (let oi = 0; oi < orbiters.length; oi++) {
-          const oa = a + (oi * Math.PI * 2) / orbiters.length;
-          orbiters[oi].position.set(Math.cos(oa) * 0.4, Math.sin(oa * 1.7) * 0.15, Math.sin(oa) * 0.4);
-          (orbiters[oi].material as THREE.SpriteMaterial).opacity = 0.45 + 0.3 * Math.sin(oa * 2);
+
+      if (b.spell === "hellbolt") {
+        b.group.rotation.y += dt * 9;
+        b.group.rotation.x += dt * 6;
+        const orbiters = b.group.userData.orbiters as THREE.Sprite[] | undefined;
+        if (orbiters) {
+          b.group.userData.angle = ((b.group.userData.angle as number) ?? 0) + dt * 10;
+          const a = b.group.userData.angle as number;
+          for (let oi = 0; oi < orbiters.length; oi++) {
+            const oa = a + (oi * Math.PI * 2) / orbiters.length;
+            orbiters[oi].position.set(Math.cos(oa) * 0.4, Math.sin(oa * 1.7) * 0.15, Math.sin(oa) * 0.4);
+            (orbiters[oi].material as THREE.SpriteMaterial).opacity = 0.45 + 0.3 * Math.sin(oa * 2);
+          }
         }
+        this.burst(b.pos.x, b.pos.y, b.pos.z, 2, 0.8, 0.28, sp.rgb);
+      } else if (b.spell === "mortar") {
+        b.group.rotation.x += dt * 7.5;
+        b.group.rotation.z += dt * 5.5;
+        b.trail += dt;
+        if (b.trail > 0.024) {
+          b.trail = 0;
+          const back = b.vel.clone().normalize().multiplyScalar(-1);
+          this.spawnSmoke(b.pos, back, 1, sp.color);
+          this.burst(b.pos.x, b.pos.y, b.pos.z, 1, 1.2, 0.3, sp.rgb);
+        }
+      } else if (b.spell === "lance") {
+        const ahead = b.pos.clone().add(b.vel);
+        b.group.lookAt(ahead);
+        this.burst(b.pos.x, b.pos.y, b.pos.z, 1, 0.6, 0.22, sp.rgb);
       }
-      // hex trail
-      this.burst(b.pos.x, b.pos.y, b.pos.z, 2, 0.8, 0.28, COL_HEX);
+
       if (!lightSet) {
         this.boltLight.position.copy(b.pos);
-        this.boltLight.intensity = 16;
+        this.boltLight.intensity = b.spell === "mortar" ? 20 : 16;
         lightSet = true;
       }
-      let boom = b.life <= 0 || b.pos.y < 0.05 || this.collider.solidAt(b.pos.x, b.pos.z) || b.pos.y > WALL_H;
+
+      let boom = b.life <= 0 || this.collider.solidAt(b.pos.x, b.pos.z) || b.pos.y > WALL_H + 1;
+      if (!boom && b.pos.y < (b.spell === "mortar" ? 0.18 : 0.05)) boom = true;
+
+      if (b.spell === "lance") {
+        // pierce: wound everything on the line, keep flying
+        if (!boom) {
+          for (const e of this.enemies) {
+            if (e.dead || e.spawnT < 1 || b.hitIds.has(e.id)) continue;
+            const d = Math.hypot(e.pos.x - b.pos.x, e.pos.z - b.pos.z);
+            const dy = Math.abs(this.enemyTop(e) * 0.5 - b.pos.y);
+            if (d < e.def.radius + 0.5 && dy < this.enemyTop(e) * 0.75) {
+              b.hitIds.add(e.id);
+              const hd = d || 1;
+              this.damageEnemy(e, 52, ((e.pos.x - b.pos.x) / hd) * 2.2, ((e.pos.z - b.pos.z) / hd) * 2.2);
+              this.spawnFlash(b.pos.x, b.pos.y, b.pos.z, 1.0, sp.color, 0.15);
+              this.burst(b.pos.x, b.pos.y, b.pos.z, 7, 4, 0.4, sp.rgb);
+            }
+          }
+        }
+        if (boom) {
+          this.explodeBolt(b);
+          this.bolts.splice(i, 1);
+        }
+        continue;
+      }
+
       if (!boom) {
         for (const e of this.enemies) {
           if (e.dead || e.spawnT < 1) continue;
@@ -2067,10 +2450,11 @@ export class HexEngine {
       fl.scale.set(fl.scale.x, Math.abs(fl.scale.y) * 0.9 + 0.16 * s, 1);
       (fl.material as THREE.SpriteMaterial).opacity = 0.75 + 0.25 * Math.sin(t * 17 + i * 3);
     }
-    // flash light decay
+    // flash light decay (peak-agnostic exponential falloff)
     if (this.flashLightT > 0) {
       this.flashLightT -= dt;
-      this.flashLight.intensity = Math.max(0, (this.flashLightT / 0.35) * 80);
+      this.flashLight.intensity *= Math.pow(0.002, dt / 0.32);
+      if (this.flashLightT <= 0) this.flashLight.intensity = 0;
     }
     // sparks
     for (let i = 0; i < this.SPARK_N; i++) {
@@ -2210,6 +2594,13 @@ export class HexEngine {
       r.mesh.scale.set(sc, sc, sc);
       (r.mesh.material as THREE.MeshBasicMaterial).opacity = (1 - ph) * 0.95;
     }
+    // chain-hex beams
+    for (const beam of this.beamPool) {
+      if (beam.life <= 0) continue;
+      beam.life -= dt;
+      if (beam.life <= 0) { beam.line.visible = false; beam.mat.opacity = 0; continue; }
+      beam.mat.opacity = Math.min(1, beam.life / 0.12);
+    }
     // embers drift
     const ep = this.ember.geometry.attributes.position as THREE.BufferAttribute;
     for (let i = 0; i < this.emberSeeds.length; i++) {
@@ -2247,7 +2638,10 @@ export class HexEngine {
       kills: this.kills,
       wave: this.wave,
       enemiesLeft: alive + this.spawnQueue.length,
-      boltReady: 1 - this.boltCd / 0.55,
+      slotReady: 1 - this.boltCd / SPELLS[this.equipped].cd,
+      equippedSpell: this.equipped,
+      spellCharges: this.spellCharges,
+      spellMax: SPELLS[this.equipped].charges,
       novaReady: 1 - this.novaCd / 4.5,
       state: this.state,
       paused: this.paused,

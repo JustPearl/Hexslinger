@@ -125,6 +125,19 @@ body,
   100% { opacity: 0; }
 }
 
+/* ---------- grimoire toast ---------- */
+.spell-toast {
+  animation: toast-rise 2.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  white-space: nowrap;
+}
+@keyframes toast-rise {
+  0% { opacity: 0; transform: translate(-50%, 16px) scale(0.9); }
+  10% { opacity: 1; transform: translate(-50%, 0) scale(1.04); }
+  16% { transform: translate(-50%, 0) scale(1); }
+  78% { opacity: 1; }
+  100% { opacity: 0; transform: translate(-50%, -12px); }
+}
+
 /* ---------- kill feed ---------- */
 .feed-in {
   animation: feed-slide 0.25s cubic-bezier(0.16, 1, 0.3, 1);
