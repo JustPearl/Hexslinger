@@ -34,7 +34,7 @@ export interface HudData {
   equippedSpell: SpellId;
   spellCharges: number;
   spellMax: number; // 0 = infinite
-  novaReady: number; // 0..1
+  slots: ({ id: SpellId; charges: number; max: number } | null)[];
   state: EngineState;
   paused: boolean;
   muted: boolean;
@@ -69,6 +69,8 @@ const ENEMY_DEFS: Record<string, EnemyDef> = {
 /* ---------- hexcraft: one slot, many grimoires ---------- */
 
 export type SpellId = "hellbolt" | "mortar" | "chain" | "lance";
+export type GrimoireId = Exclude<SpellId, "hellbolt">;
+export const GRIMOIRE_ORDER: GrimoireId[] = ["mortar", "chain", "lance"];
 
 export interface SpellDef {
   name: string;
@@ -303,12 +305,11 @@ export class HexEngine {
   private recoil = 0;
   private recoilPitch = 0;
   private boltCd = 0;
-  private novaCd = 0;
   private equipped: SpellId = "hellbolt";
-  private spellCharges = 0;
+  private inventory: Record<GrimoireId, number> = { mortar: 0, chain: 0, lance: 0 };
   private tomePity = 0;
   private castLunge = 0;
-  private novaLunge = 0;
+  private castColor = new THREE.Color(C_SPELL);
   private shotsFired = 0;
   private shotsHit = 0;
   private muzzleT = 0;
@@ -344,6 +345,7 @@ export class HexEngine {
 
   /* viewmodel */
   private vm = new THREE.Group();
+  private fingers: THREE.Group[] = [];
   private gunGroup!: THREE.Group;
   private spellGroup!: THREE.Group;
   private muzzleAnchor!: THREE.Object3D;
@@ -369,6 +371,7 @@ export class HexEngine {
   private wispPool: Wisp[] = [];
   private casingPool: Casing[] = [];
   private flashSprPool: FlashSpr[] = [];
+  private runeBurstPool: FlashSpr[] = [];
   private beamPool: { line: THREE.Line; geo: THREE.BufferGeometry; mat: THREE.LineBasicMaterial; life: number }[] = [];
   private smokeTex!: THREE.Texture;
   private scorchTex!: THREE.Texture;
@@ -767,23 +770,41 @@ export class HexEngine {
     this.muzzleAnchor.add(this.muzzleFlash);
     this.vm.add(this.gunGroup);
 
-    /* --- spell hand (left) --- */
+    /* --- spell hand (left) — rests low, whips up only to cast --- */
     this.spellGroup = new THREE.Group();
-    this.spellGroup.position.set(-0.33, -0.3, -0.52);
-    const sleeve2 = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.14, 0.55, 7), sleeveMat);
-    sleeve2.position.set(-0.12, -0.26, 0.26);
+    this.spellGroup.position.set(-0.52, -0.56, -0.4);
+    const sleeve2 = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.15, 0.6, 7), sleeveMat);
+    sleeve2.position.set(-0.1, -0.24, 0.24);
     sleeve2.rotation.set(0.8, 0, -0.5);
-    const hand2 = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.05, 0.13), skinMat);
+    const hand2 = new THREE.Mesh(new THREE.BoxGeometry(0.095, 0.05, 0.13), skinMat);
     hand2.position.set(0, -0.02, 0);
     hand2.rotation.x = -0.4;
     this.spellGroup.add(sleeve2, hand2);
 
+    // rigged fingers: three knuckled boxes that splay open when channeling
+    this.fingers = [];
+    for (let fi = 0; fi < 3; fi++) {
+      const piv = new THREE.Group();
+      piv.position.set(-0.032 + fi * 0.032, 0.0, -0.065);
+      const seg = new THREE.Mesh(new THREE.BoxGeometry(0.024, 0.02, 0.075), skinMat);
+      seg.position.z = -0.035;
+      piv.add(seg);
+      piv.rotation.x = 0.95; // curled at rest
+      hand2.add(piv);
+      this.fingers.push(piv);
+    }
+    const thumb = new THREE.Mesh(new THREE.BoxGeometry(0.022, 0.02, 0.055), skinMat);
+    thumb.position.set(0.055, -0.01, -0.02);
+    thumb.rotation.set(0.4, 0, 0.7);
+    hand2.add(thumb);
+
     this.spellOrb = new THREE.Group();
-    this.spellOrb.position.set(0, 0.16, -0.05);
+    this.spellOrb.position.set(0, 0.13, -0.1);
+    this.spellOrb.scale.setScalar(0.001);
     const orbCore = new THREE.Mesh(new THREE.OctahedronGeometry(0.07, 0), new THREE.MeshBasicMaterial({ color: C_SPELL_HOT }));
-    const orbGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: C_SPELL, blending: THREE.AdditiveBlending, depthWrite: false }));
+    const orbGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.glowTex, color: C_SPELL, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0 }));
     orbGlow.scale.set(0.7, 0.7, 1);
-    const runeCard = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.runeTex, color: C_SPELL, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0.75 }));
+    const runeCard = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.runeTex, color: C_SPELL, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, opacity: 0 }));
     runeCard.scale.set(0.5, 0.5, 1);
     this.spellOrb.add(orbCore, orbGlow, runeCard);
     this.spellGroup.add(this.spellOrb);
@@ -903,6 +924,13 @@ export class HexEngine {
       this.scene.add(sprite);
       this.flashSprPool.push({ sprite, life: 0, maxLife: 0.3, maxScale: 4, alive: false });
     }
+    // rune-ring sprites for the casting flourish
+    for (let i = 0; i < 9; i++) {
+      const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: this.runeTex, color: C_SPELL, blending: THREE.AdditiveBlending, transparent: true, opacity: 0, depthWrite: false }));
+      sprite.visible = false;
+      this.scene.add(sprite);
+      this.runeBurstPool.push({ sprite, life: 0, maxLife: 0.3, maxScale: 1, alive: false });
+    }
     // chain-hex lightning beams
     for (let i = 0; i < 10; i++) {
       const geo = new THREE.BufferGeometry();
@@ -933,9 +961,12 @@ export class HexEngine {
       return;
     }
     if (e.code === "KeyR") this.startReload();
-    if (e.code === "KeyQ") this.castNova();
     if (e.code === "KeyM") this.toggleMute();
     if (e.code === "KeyP") this.pauseGame(true);
+    // grimoire inventory: keys 1-4 select a slot
+    const slotKeys = ["Digit1", "Digit2", "Digit3", "Digit4"];
+    const si = slotKeys.indexOf(e.code);
+    if (si >= 0) this.selectSlot(si);
   };
   private onKeyUp = (e: KeyboardEvent) => this.keys.delete(e.code);
 
@@ -965,6 +996,11 @@ export class HexEngine {
   };
   private onResize = () => this.handleResize();
   private onCtx = (e: Event) => e.preventDefault();
+  private onWheel = (e: WheelEvent) => {
+    if (this.state !== "playing" || this.paused || this.dead) return;
+    e.preventDefault();
+    this.cycleSlot(e.deltaY > 0 ? 1 : -1);
+  };
 
   private bindInput() {
     window.addEventListener("keydown", this.onKeyDown);
@@ -975,6 +1011,42 @@ export class HexEngine {
     document.addEventListener("pointerlockchange", this.onLockChange);
     window.addEventListener("resize", this.onResize);
     this.canvas.addEventListener("contextmenu", this.onCtx);
+    this.canvas.addEventListener("wheel", this.onWheel, { passive: false });
+  }
+
+  /* ---------- grimoire inventory ---------- */
+
+  private ownedList(): SpellId[] {
+    const out: SpellId[] = ["hellbolt"];
+    for (const id of GRIMOIRE_ORDER) if (this.inventory[id] > 0) out.push(id);
+    return out;
+  }
+
+  private selectSlot(idx: number) {
+    // slot order is fixed: 1 = hellbolt, 2/3/4 = mortar/chain/lance when owned
+    if (idx === 0) { this.equip("hellbolt"); return; }
+    const id = GRIMOIRE_ORDER[idx - 1];
+    if (this.inventory[id] > 0) this.equip(id);
+  }
+
+  private cycleSlot(dir: number) {
+    const owned = this.ownedList();
+    if (owned.length < 2) return;
+    const i = Math.max(0, owned.indexOf(this.equipped));
+    this.equip(owned[(i + dir + owned.length) % owned.length]);
+  }
+
+  private equip(id: SpellId) {
+    if (this.equipped === id) return;
+    this.equipped = id;
+    this.audio.slotTick();
+    const sp = SPELLS[id];
+    // small flourish so switching feels physical
+    this.castLunge = Math.max(this.castLunge, 0.35);
+    const hand = new THREE.Vector3();
+    this.spellOrb.getWorldPosition(hand);
+    this.burst(hand.x, hand.y, hand.z, 6, 1.6, 0.3, sp.rgb);
+    this.pushHud();
   }
 
   private tryLock() {
@@ -999,8 +1071,8 @@ export class HexEngine {
     this.keys.clear();
     this.clearWorld();
     this.hp = 100; this.souls = 100; this.ammo = 6;
-    this.reloading = false; this.fireCd = 0; this.boltCd = 0; this.novaCd = 0;
-    this.equipped = "hellbolt"; this.spellCharges = 0; this.tomePity = 0;
+    this.reloading = false; this.fireCd = 0; this.boltCd = 0;
+    this.equipped = "hellbolt"; this.inventory = { mortar: 0, chain: 0, lance: 0 }; this.tomePity = 0;
     this.score = 0; this.kills = 0; this.wave = 0;
     this.shotsFired = 0; this.shotsHit = 0;
     this.dead = false; this.deathT = 0; this.timeScale = 1;
@@ -1392,11 +1464,13 @@ export class HexEngine {
           this.onEvent({ type: "heal" });
         } else if (p.kind === "tome" && p.spell) {
           const sp = SPELLS[p.spell];
-          this.equipped = p.spell;
-          this.spellCharges = sp.charges;
+          const gid = p.spell as GrimoireId;
+          const fresh = this.inventory[gid] <= 0;
+          this.inventory[gid] = sp.charges;
+          this.equip(p.spell);
           this.score += 150;
           this.audio.tomePickup();
-          this.onEvent({ type: "spell", text: `${sp.name} SEIZED ×${sp.charges}`, color: sp.css });
+          this.onEvent({ type: "spell", text: fresh ? `${sp.name} SEIZED ×${sp.charges}` : `${sp.name} RESTOCKED ×${sp.charges}`, color: sp.css });
           this.showDamage(this.pos.x, 2.3, this.pos.z, sp.name, true);
           for (let k = 0; k < 7; k++) this.spawnWisp(p.pos.x, 0.6, p.pos.z, sp.color);
           this.burst(p.pos.x, 0.8, p.pos.z, 14, 4, 0.6, sp.rgb);
@@ -1503,8 +1577,10 @@ export class HexEngine {
 
     this.souls -= sp.cost;
     if (id !== "hellbolt") {
-      this.spellCharges--;
-      if (this.spellCharges <= 0) {
+      const gid = id as GrimoireId;
+      this.inventory[gid]--;
+      if (this.inventory[gid] <= 0) {
+        this.inventory[gid] = 0;
         this.equipped = "hellbolt";
         this.audio.spellSpent();
         this.onEvent({ type: "spell", text: "GRIMOIRE SPENT — HELLBOLT RESTORED", color: "#e8e2d2" });
@@ -1513,6 +1589,7 @@ export class HexEngine {
     this.boltCd = sp.cd;
     this.castLunge = 1;
     this.boltLight.color.set(sp.color);
+    this.castColor.set(sp.color);
 
     const hand = new THREE.Vector3();
     this.spellOrb.getWorldPosition(hand);
@@ -1585,8 +1662,9 @@ export class HexEngine {
     this.scene.add(g);
     this.bolts.push({ group: g, pos: start.clone(), vel, life, alive: true, spell: id, grav, hitIds: new Set(), trail: 0 });
 
-    // hex discharge at the casting hand
+    // hex discharge at the casting hand — a quick rune ring + flash flourish
     this.spawnFlash(hand.x, hand.y, hand.z, id === "mortar" ? 2.4 : 1.6, sp.color, 0.22);
+    this.spawnRuneBurst(hand, sp.color);
     this.burst(hand.x, hand.y, hand.z, 8, 2.5, 0.3, sp.rgb);
     if (id === "mortar") this.spawnSmoke(hand, dir, 3, sp.color);
   }
@@ -1684,41 +1762,6 @@ export class HexEngine {
     this.flashLight.intensity = 55;
     this.flashLightT = 0.22;
     this.addShake(0.16);
-  }
-
-  private castNova() {
-    if (this.novaCd > 0 || this.dead) return;
-    if (this.souls < 55) { this.audio.dryFire(); return; }
-    this.souls -= 55;
-    this.novaCd = 4.5;
-    this.novaLunge = 1;
-    this.audio.nova();
-    this.spawnRing(this.pos.x, 0.1, this.pos.z, 7.2, 0.5);
-    this.spawnRing(this.pos.x, 0.14, this.pos.z, 4.8, 0.78);
-    this.spawnFlash(this.pos.x, 0.6, this.pos.z, 7.5, C_SPELL, 0.45);
-    this.spawnFlash(this.pos.x, 1.1, this.pos.z, 3, C_SPELL_HOT, 0.2);
-    this.flashLight.position.set(this.pos.x, 1.4, this.pos.z);
-    this.flashLight.color.set(C_SPELL);
-    this.flashLight.intensity = 120;
-    this.flashLightT = 0.35;
-    this.burstChunks(this.pos.x, 0.8, this.pos.z, 26, 8);
-    this.burst(this.pos.x, 1, this.pos.z, 24, 9, 1, COL_HEX);
-    this.burst(this.pos.x, 0.5, this.pos.z, 14, 6, 0.6, COL_BONE);
-    for (let k = 0; k < 9; k++) {
-      const a = (k / 9) * Math.PI * 2;
-      this.spawnWisp(this.pos.x + Math.cos(a) * rnd(0.6, 2.2), 0.3, this.pos.z + Math.sin(a) * rnd(0.6, 2.2), C_SPELL);
-    }
-    this.addShake(0.7);
-    for (const e of this.enemies) {
-      if (e.dead) continue;
-      const dx = e.pos.x - this.pos.x;
-      const dz = e.pos.z - this.pos.z;
-      const d = Math.hypot(dx, dz);
-      if (d < 7) {
-        const fall = 1 - (d / 7) * 0.45;
-        this.damageEnemy(e, 72 * fall, (dx / (d || 1)) * 9, (dz / (d || 1)) * 9);
-      }
-    }
   }
 
   private explodeBolt(b: Bolt) {
@@ -1907,6 +1950,22 @@ export class HexEngine {
     f.sprite.visible = true;
   }
 
+  /* rune-ring flourish around the casting hand */
+  private spawnRuneBurst(at: THREE.Vector3, color: number) {
+    for (let k = 0; k < 3; k++) {
+      const f = this.runeBurstPool.find((q) => !q.alive) ?? this.runeBurstPool[0];
+      f.alive = true;
+      f.maxScale = 0.5 + k * 0.55;
+      f.maxLife = 0.3 + k * 0.06;
+      f.life = f.maxLife - k * 0.04;
+      f.sprite.position.copy(at);
+      const m = f.sprite.material as THREE.SpriteMaterial;
+      m.color.set(color);
+      m.rotation = rnd(0, Math.PI * 2);
+      f.sprite.visible = true;
+    }
+  }
+
   private dumpCasings() {
     const from = new THREE.Vector3();
     this.chamber.getWorldPosition(from);
@@ -2085,7 +2144,6 @@ export class HexEngine {
     this.invuln = Math.max(0, this.invuln - dt);
     this.fireCd = Math.max(0, this.fireCd - dt);
     this.boltCd = Math.max(0, this.boltCd - dt);
-    this.novaCd = Math.max(0, this.novaCd - dt);
 
     if (this.reloading) {
       this.reloadT += dt;
@@ -2159,8 +2217,7 @@ export class HexEngine {
 
     this.recoil = Math.max(0, this.recoil - dt * 6);
     this.gunKick = Math.max(0, this.gunKick - dt * 5.5);
-    this.castLunge = Math.max(0, this.castLunge - dt * 4.5);
-    this.novaLunge = Math.max(0, this.novaLunge - dt * 3.5);
+    this.castLunge = Math.max(0, this.castLunge - dt * 2.1);
 
     const kick = this.gunKick * this.gunKick;
     this.gunGroup.position.set(
@@ -2186,19 +2243,46 @@ export class HexEngine {
     }
     this.muzzleLight.intensity = Math.max(0, this.muzzleLight.intensity - dt * 600);
 
-    // spell orb life
-    const pulse = 0.85 + Math.sin(t * 3.2) * 0.15;
-    const soulGlow = 0.4 + (this.souls / 100) * 0.6;
-    this.spellOrb.scale.setScalar(pulse * (1 + this.castLunge * 0.5));
-    this.spellOrb.rotation.y += dt * 2.2;
-    this.spellOrb.rotation.x += dt * 1.4;
-    ((this.spellOrb.children[1] as THREE.Sprite).material as THREE.SpriteMaterial).opacity = soulGlow;
+    /* ---- caster's left hand: rests low & tucked, whips up to draw a sigil ---- */
+    // castLunge 1 -> 0 across the gesture; extend rises to 1 mid-gesture, back to 0
+    const phase = 1 - this.castLunge; // 0..1 through the flourish
+    const extend = this.castLunge > 0 ? Math.sin(Math.min(1, phase / 0.92) * Math.PI) : 0;
+    const e2 = extend * extend;
+
+    // hand sweeps from a low tucked rest to a forward casting apex with a slight whip arc
+    const restX = -0.44, restY = -0.44, restZ = -0.4;
+    const apexX = -0.13, apexY = -0.16, apexZ = -0.52;
+    const arc = Math.sin(phase * Math.PI) * 0.09; // lateral whip across the body
     this.spellGroup.position.set(
-      -0.33 + swayX * 0.5,
-      -0.3 + swayY - this.novaLunge * 0.1,
-      -0.52 + this.castLunge * 0.18
+      restX + (apexX - restX) * e2 + arc + swayX * 0.4,
+      restY + (apexY - restY) * e2 + swayY * 0.5,
+      restZ + (apexZ - restZ) * e2
     );
-    this.spellGroup.rotation.x = -this.castLunge * 0.5 - this.novaLunge * 0.35;
+    // wrist: curled at rest, snapping palm-forward at the apex
+    this.spellGroup.rotation.x = 0.55 - 1.15 * extend;
+    this.spellGroup.rotation.z = -0.35 + 0.5 * extend;
+    this.spellGroup.rotation.y = 0.2 * extend;
+
+    // fingers uncurl as the sigil forms
+    for (let fi = 0; fi < this.fingers.length; fi++) {
+      const curl = 0.95 - 1.25 * extend + Math.sin(t * 40 + fi * 2) * 0.06 * extend;
+      this.fingers[fi].rotation.x = curl;
+    }
+
+    // the conjured orb is only alive during the gesture — flare, spin, vanish
+    const pulse = 0.85 + Math.sin(t * 30) * 0.12 * extend;
+    this.spellOrb.scale.setScalar(Math.max(0.001, extend * pulse * 1.35));
+    this.spellOrb.rotation.y += dt * (2 + 26 * extend);
+    this.spellOrb.rotation.x += dt * (1 + 12 * extend);
+    const orbCore = this.spellOrb.children[0] as THREE.Mesh;
+    (orbCore.material as THREE.MeshBasicMaterial).color.copy(this.castColor).lerp(new THREE.Color(0xffffff), 0.35 + 0.4 * extend);
+    const orbGlow = this.spellOrb.children[1] as THREE.Sprite;
+    (orbGlow.material as THREE.SpriteMaterial).opacity = extend;
+    (orbGlow.material as THREE.SpriteMaterial).color.copy(this.castColor);
+    const runeCard = this.spellOrb.children[2] as THREE.Sprite;
+    (runeCard.material as THREE.SpriteMaterial).opacity = extend * 0.9;
+    (runeCard.material as THREE.SpriteMaterial).color.copy(this.castColor);
+    runeCard.material.rotation += dt * 3 * extend;
   }
 
   /* ------------------------------ enemies tick ------------------------------ */
@@ -2584,6 +2668,18 @@ export class HexEngine {
       f.sprite.scale.set(s, s, 1);
       (f.sprite.material as THREE.SpriteMaterial).opacity = (1 - k) * (1 - k) * 1.1;
     }
+    // casting rune rings — expand & spin out
+    for (const f of this.runeBurstPool) {
+      if (!f.alive) continue;
+      f.life -= dt;
+      if (f.life <= 0) { f.alive = false; f.sprite.visible = false; continue; }
+      const k = 1 - Math.max(0, f.life) / f.maxLife;
+      const s = f.maxScale * (0.3 + 1.4 * k);
+      f.sprite.scale.set(s, s, 1);
+      const m = f.sprite.material as THREE.SpriteMaterial;
+      m.opacity = (1 - k) * 0.9;
+      m.rotation += dt * (2 + 5 * (1 - k));
+    }
     // rings
     for (const r of this.rings) {
       if (!r.alive) continue;
@@ -2623,6 +2719,17 @@ export class HexEngine {
     }
   }
 
+  private buildSlots(): HudData["slots"] {
+    const out: HudData["slots"] = [];
+    // slot 1 is always the soul-fed hellbolt
+    out.push({ id: "hellbolt", charges: -1, max: 0 });
+    for (const id of GRIMOIRE_ORDER) {
+      const n = this.inventory[id];
+      out.push(n > 0 ? { id, charges: n, max: SPELLS[id].charges } : null);
+    }
+    return out;
+  }
+
   private pushHud() {
     const alive = this.enemies.filter((e) => !e.dead).length;
     this.onHud({
@@ -2640,9 +2747,9 @@ export class HexEngine {
       enemiesLeft: alive + this.spawnQueue.length,
       slotReady: 1 - this.boltCd / SPELLS[this.equipped].cd,
       equippedSpell: this.equipped,
-      spellCharges: this.spellCharges,
+      spellCharges: this.equipped === "hellbolt" ? -1 : this.inventory[this.equipped as GrimoireId],
       spellMax: SPELLS[this.equipped].charges,
-      novaReady: 1 - this.novaCd / 4.5,
+      slots: this.buildSlots(),
       state: this.state,
       paused: this.paused,
       muted: this.audio.muted,

@@ -210,6 +210,10 @@ export class HexAudio {
     this.tone(520, 180, 0.25, 0.2, "triangle");
     this.tone(260, 120, 0.3, 0.16, "triangle", 0.12);
   }
+  slotTick() {
+    this.tone(950, 620, 0.05, 0.14, "square");
+    this.noise(0.04, 0.2, 3600, 1400, "bandpass");
+  }
   playerDeath() {
     this.tone(220, 30, 1.4, 0.5, "sawtooth");
     this.noise(1.2, 0.6, 800, 50);

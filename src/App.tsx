@@ -83,8 +83,9 @@ const BruteGlyph = () => (
 const DEFAULT_HUD: HudData = {
   hp: 100, maxHp: 100, souls: 100, maxSouls: 100, ammo: 6, maxAmmo: 6,
   reloading: false, reloadProgress: 0, score: 0, kills: 0, wave: 0, enemiesLeft: 0,
-  slotReady: 1, equippedSpell: "hellbolt", spellCharges: 0, spellMax: 0,
-  novaReady: 1, state: "menu", paused: false, muted: false, fps: 60,
+  slotReady: 1, equippedSpell: "hellbolt", spellCharges: -1, spellMax: 0,
+  slots: [{ id: "hellbolt", charges: -1, max: 0 }, null, null, null],
+  state: "menu", paused: false, muted: false, fps: 60,
 };
 
 interface FeedItem { id: number; text: string; dying: boolean; color?: string }
@@ -119,57 +120,63 @@ function spellIcon(id: SpellId, size = 26) {
   return <HellboltIcon size={size} />;
 }
 
-function HexSlot({ hud }: { hud: HudData }) {
-  const sp = SPELLS[hud.equippedSpell];
-  const ready = hud.slotReady >= 1;
-  const affordable = hud.souls >= sp.cost;
-  const on = ready && affordable;
+function GrimoireBar({ hud }: { hud: HudData }) {
+  const eq = SPELLS[hud.equippedSpell];
+  const eqReady = hud.slotReady >= 1;
   const deg = Math.round((1 - Math.max(0, Math.min(1, hud.slotReady))) * 360);
-  const infinite = hud.spellMax === 0;
   return (
-    <div className="relative flex items-center gap-3 border-2 bg-black/70 px-3 py-2"
-      style={{ borderColor: on ? sp.css : "rgba(138,134,122,0.5)", boxShadow: on ? `0 0 18px ${sp.css}33, inset 0 0 14px ${sp.css}1a` : undefined }}>
-      <div className={on ? "" : "opacity-45"} style={on ? { color: sp.css, filter: `drop-shadow(0 0 7px ${sp.css}88)` } : { color: "#8a867a" }}>
-        {spellIcon(hud.equippedSpell, 30)}
-      </div>
-      <div>
-        <div className="font-type text-[11px] leading-none tracking-[0.18em]" style={{ color: on ? sp.css : "#8a867a" }}>
-          {sp.name}
-        </div>
-        <div className="mt-1 flex items-center gap-2 text-[9px] leading-none text-ash">
-          <kbd className="key !text-[8px] !px-1 !py-0">RMB</kbd>
-          <span style={affordable ? { color: sp.css } : { color: "#e8e2d2" }}>{sp.cost}◈</span>
-          {infinite ? (
-            <span className="tracking-[0.14em] text-bone/70">SOUL-FED ∞</span>
-          ) : (
-            <span className="flex items-center gap-[2px]">
-              {Array.from({ length: hud.spellMax }).map((_, i) => (
-                <span key={i} className="inline-block h-2 w-[4px]"
-                  style={{ background: i < hud.spellCharges ? sp.css : "rgba(138,134,122,0.35)" }} />
-              ))}
+    <div className="flex items-stretch gap-1.5">
+      {hud.slots.map((slot, i) => {
+        const key = i + 1;
+        if (!slot) {
+          return (
+            <div key={`empty-${i}`} className="relative flex h-[64px] w-[64px] flex-col items-center justify-center border-2 border-ash/25 bg-black/40">
+              <span className="absolute left-1 top-0.5 text-[8px] text-ash/50">{key}</span>
+              <span className="font-display text-xl text-ash/30">·</span>
+              <span className="text-[7px] tracking-[0.14em] text-ash/40">EMPTY</span>
+            </div>
+          );
+        }
+        const sp = SPELLS[slot.id];
+        const active = hud.equippedSpell === slot.id;
+        const infinite = slot.max === 0;
+        const afford = hud.souls >= sp.cost;
+        const lit = active && eqReady && afford;
+        const dim = !afford;
+        return (
+          <div key={slot.id}
+            className={`relative flex h-[64px] w-[64px] flex-col items-center justify-center gap-0.5 border-2 bg-black/70 transition-all duration-150 ${active ? "-translate-y-1" : ""}`}
+            style={{
+              borderColor: active ? sp.css : "rgba(138,134,122,0.4)",
+              boxShadow: lit ? `0 0 16px ${sp.css}44, inset 0 0 12px ${sp.css}22` : undefined,
+              opacity: dim && !active ? 0.55 : 1,
+            }}>
+            <span className="absolute left-1 top-0.5 text-[8px]" style={{ color: active ? sp.css : "#8a867a" }}>{key}</span>
+            <span style={{ color: active ? sp.css : "#8a867a", filter: lit ? `drop-shadow(0 0 6px ${sp.css}88)` : undefined, opacity: dim ? 0.4 : 1 }}>
+              {spellIcon(slot.id, 22)}
             </span>
-          )}
-        </div>
+            {infinite ? (
+              <span className="text-[8px] leading-none tracking-widest" style={{ color: active ? sp.css : "#8a867a" }}>∞</span>
+            ) : (
+              <span className="flex items-center gap-[2px]">
+                {Array.from({ length: slot.max }).map((_, j) => (
+                  <span key={j} className="inline-block h-[7px] w-[3px]"
+                    style={{ background: j < slot.charges ? sp.css : "rgba(138,134,122,0.3)" }} />
+                ))}
+              </span>
+            )}
+            <span className="text-[7px] leading-none tracking-[0.1em]" style={{ color: active ? sp.css : "#6d695e" }}>{sp.cost}◈</span>
+            {active && !eqReady && (
+              <div className="absolute inset-0 pointer-events-none" style={{ background: `conic-gradient(rgba(6,6,6,0.82) ${deg}deg, transparent 0deg)` }} />
+            )}
+          </div>
+        );
+      })}
+      <div className="ml-2 flex flex-col justify-center border-l border-bone/20 pl-2.5">
+        <div className="text-[8px] tracking-[0.2em] text-ash">RMB — CAST {eq.name}</div>
+        <div className="mt-1 text-[8px] tracking-[0.14em] text-ash/70">1–4 / WHEEL — SWAP GRIMOIRE</div>
+        <div className="mt-1 text-[9px] tracking-[0.12em]" style={{ color: eq.css }}>{eq.blurb}</div>
       </div>
-      {!ready && (
-        <div className="absolute inset-0 pointer-events-none" style={{ background: `conic-gradient(rgba(6,6,6,0.82) ${deg}deg, transparent 0deg)` }} />
-      )}
-    </div>
-  );
-}
-
-function NovaChip({ hud }: { hud: HudData }) {
-  const on = hud.novaReady >= 1 && hud.souls >= 55;
-  const deg = Math.round((1 - Math.max(0, Math.min(1, hud.novaReady))) * 360);
-  return (
-    <div className={`relative border-2 px-2 py-2 text-center ${on ? "border-bone/70 bg-black/70" : "border-ash/40 bg-black/50"}`}>
-      <div className={`flex justify-center ${on ? "text-bone" : "text-ash/60"}`}><NovaIcon size={18} /></div>
-      <div className="mt-0.5 text-[8px] leading-none tracking-[0.14em] text-ash">
-        <kbd className="key !text-[8px] !px-1 !py-0">Q</kbd> 55◈
-      </div>
-      {!on && (
-        <div className="absolute inset-0 pointer-events-none" style={{ background: `conic-gradient(rgba(6,6,6,0.82) ${deg}deg, transparent 0deg)` }} />
-      )}
     </div>
   );
 }
@@ -374,10 +381,9 @@ export default function App() {
             )}
           </div>
 
-          {/* bottom-center: the hex slot + fixed nova */}
-          <div className="absolute bottom-6 left-1/2 flex -translate-x-1/2 items-end gap-2.5">
-            <HexSlot hud={hud} />
-            <NovaChip hud={hud} />
+          {/* bottom-center: grimoire inventory */}
+          <div className="absolute bottom-5 left-1/2 -translate-x-1/2">
+            <GrimoireBar hud={hud} />
           </div>
 
           {/* grimoire toast */}
@@ -433,13 +439,13 @@ export default function App() {
               <div className="mt-6 flex flex-wrap gap-x-5 gap-y-2 text-[10px] tracking-[0.18em] text-ash">
                 <span><kbd className="key">W</kbd><kbd className="key">A</kbd><kbd className="key">S</kbd><kbd className="key">D</kbd> MOVE</span>
                 <span><kbd className="key">LMB</kbd> HANDCANNON</span>
-                <span><kbd className="key">RMB</kbd> HEX SLOT</span>
-                <span><kbd className="key">Q</kbd> NOVA</span>
+                <span><kbd className="key">RMB</kbd> CAST HEX</span>
+                <span><kbd className="key">1–4</kbd>/<kbd className="key">WHEEL</kbd> SWAP GRIMOIRE</span>
                 <span><kbd className="key">SHIFT</kbd> SPRINT</span>
                 <span><kbd className="key">SPACE</kbd> VAULT</span>
               </div>
               <div className="mt-3 text-[10px] tracking-[0.14em] text-ash/80">
-                GRIMOIRES DROP FROM THE RABBLE — SEIZE THEM TO SWAP YOUR HEX.
+                GRIMOIRES DROP FROM THE RABBLE — CARRY UP TO THREE, SWAP MID-FIGHT.
               </div>
             </div>
 
